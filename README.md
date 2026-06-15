@@ -73,7 +73,7 @@ LLM 调用此工具下载指定 ID 的本子：
 > 📎 /path/to/cache/421982.pdf
 > ```
 >
-> LLM → 通过 `<file type="file">/path/to/cache/421982.pdf</file>` 发送文件给用户
+> LLM → 通过文件标签发送 PDF 给用户
 
 ## 配置
 
@@ -82,7 +82,8 @@ LLM 调用此工具下载指定 ID 的本子：
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `max_cache` | integer | 10 | 最多缓存几本 PDF，超限自动删最旧 |
-| `desc_max_length` | integer | 80 | 描述截取字符数，避免刷屏 |
+| `desc_max_length` | integer | 80 | 描述截取字符数 |
+| `download_threads` | integer | 45 | 下载图片的并行线程数 |
 
 ### 配置文件示例（`schema.json`）
 
@@ -96,7 +97,12 @@ LLM 调用此工具下载指定 ID 的本子：
   "desc_max_length": {
     "type": "integer",
     "default": 80,
-    "hint": "描述截取字符数，避免刷屏"
+    "hint": "描述截取字符数"
+  },
+  "download_threads": {
+    "type": "integer",
+    "default": 45,
+    "hint": "下载图片的并行线程数"
   }
 }
 ```
@@ -112,18 +118,14 @@ LLM 调用此工具下载指定 ID 的本子：
 
 ```
 KiraAI-jmdown-plugin/
-├── jmdown/
-│   ├── __init__.py         # 插件入口
-│   ├── main.py             # 核心实现（下载、PDF、缓存）
-│   ├── manifest.json       # 插件元信息
-│   ├── schema.json         # 配置参数定义
-│   └── requirements.txt    # 依赖声明
-├── tests/
-│   ├── __init__.py
-│   └── test_cache.py       # 缓存单元测试
-├── pyproject.toml           # 项目元数据
+├── __init__.py         # 插件入口
+├── main.py             # 核心实现（下载、PDF、缓存）
+├── cache.py            # 缓存模块（FIFO 队列）
+├── manifest.json       # 插件元信息
+├── schema.json         # 配置参数定义
+├── requirements.txt    # 依赖声明
 ├── .gitignore
-├── LICENSE                  # MIT 许可
+├── LICENSE             # MIT 许可
 └── README.md
 ```
 

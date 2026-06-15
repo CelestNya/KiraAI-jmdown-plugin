@@ -7,6 +7,11 @@
     "desc_max_length": {
         "type": "integer",
         "default": 80,
-        "hint": "描述截取字符数，避免刷屏"
+        "hint": "描述截取字符数"
+    },
+    "download_threads": {
+        "type": "integer",
+        "default": 45,
+        "hint": "下载图片的并行线程数"
     }
 }
