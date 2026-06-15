@@ -129,22 +129,6 @@ KiraAI-jmdown-plugin/
 └── README.md
 ```
 
-## 开发
-
-### 设置开发环境
-
-```bash
-git clone https://github.com/CelestNya/KiraAI-jmdown-plugin.git
-cd KiraAI-jmdown-plugin
-pip install -e ".[test]"
-```
-
-### 运行测试
-
-```bash
-pytest
-```
-
 ## 许可
 
 [MIT](LICENSE)
