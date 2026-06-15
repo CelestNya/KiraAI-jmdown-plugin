@@ -26,14 +26,14 @@ class JMDownError(Exception):
 
 # ── 下载 & PDF ──
 
-def _download_images(album_id: int, download_dir: Path) -> tuple:
+def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tuple:
     """下载图片, 返回 (album_obj, image_dir, images[], title, desc)."""
     opt = jmcomic.JmOption.default()
     opt.dir_rule.base_dir = str(download_dir.resolve())
     opt.dir_rule.rule = "Aid"
     opt.download.image.suffix = ".jpg"
     opt.download.image.decode = True
-    opt.download.threading.image = 45
+    opt.download.threading.image = threads
     opt.client.retry_times = 3
     opt.plugins.after_album = []
 
@@ -204,8 +204,9 @@ class JMdownPlugin(BasePlugin):
 
         logger.info(f"下载 #{album_id} ...")
 
+        threads = int(self.plugin_cfg.get("download_threads", 45))
         _, image_dir, images, title, description = _download_images(
-            album_id, self._download_dir
+            album_id, self._download_dir, threads
         )
 
         pdf_path = self._cache_dir / f"{album_id}.pdf"
