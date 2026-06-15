@@ -1,0 +1,2 @@
+jmcomic>=2.7
+Pillow>=11

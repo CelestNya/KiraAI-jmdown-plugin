@@ -1,0 +1,8 @@
+{
+    "display_name": "JMComic 下载器",
+    "plugin_id": "jmdown",
+    "version": "1.0.0",
+    "author": "KiraAI",
+    "description": "下载禁漫天堂 (JMComic) 本子，支持单本和批量下载",
+    "repo": null
+}

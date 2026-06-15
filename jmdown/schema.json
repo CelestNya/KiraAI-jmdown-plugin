@@ -1,0 +1,12 @@
+{
+    "max_cache": {
+        "type": "integer",
+        "default": 10,
+        "hint": "最多缓存几本 PDF，超限自动删最旧"
+    },
+    "desc_max_length": {
+        "type": "integer",
+        "default": 80,
+        "hint": "描述截取字符数，避免刷屏"
+    }
+}
