@@ -25,6 +25,11 @@ from core.chat.message_utils import MessageChain
 from .cache import CacheEntry, CacheIndex
 
 
+class JMDownError(RuntimeError):
+    """JMdown 插件自定义错误"""
+    pass
+
+
 @dataclass
 class TaskState:
     """后台任务状态"""
@@ -65,7 +70,6 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     """下载图片, 返回 (album_obj, image_dir, images[], title, desc)."""
     opt = jmcomic.JmOption.default()
     opt.dir_rule.base_dir = str(download_dir.resolve())
-    opt.dir_rule.rule = "Aid"
     opt.download.image.suffix = ".jpg"
     opt.download.image.decode = True
     opt.download.threading.image = threads
@@ -83,18 +87,19 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     title = getattr(album_obj, "name", str(album_id))
     description = getattr(album_obj, "description", "")
 
-    # 目录由 Aid 规则决定: {base_dir}/{album_id}/
-    image_dir = download_dir / str(album_id)
-    if not image_dir.is_dir():
-        raise JMDownError(f"下载目录不存在: {image_dir}")
-
+    # 找到实际下载目录（默认 Bd_Pname 规则，目录名 = 本子标题）
     valid = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
-    images = sorted(
-        p for p in image_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in valid
-    )
-    if not images:
-        raise JMDownError(f"下载完成但目录中无图片文件: {image_dir}")
+    image_dir: Optional[Path] = None
+    for d in download_dir.iterdir():
+        if not d.is_dir():
+            continue
+        imgs = [p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in valid]
+        if len(imgs) == album_obj.page_count:
+            image_dir = d
+            images = sorted(imgs)
+            break
+    if image_dir is None:
+        raise JMDownError(f"下载完成但未找到含 {album_obj.page_count} 张图片的目录, 请检查配置")
 
     return album_obj, image_dir, images, title, description
 
