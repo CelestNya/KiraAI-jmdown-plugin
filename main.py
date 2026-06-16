@@ -336,14 +336,15 @@ class JMdownPlugin(BasePlugin):
             if cached and Path(cached.pdf_path).exists():
                 state.phases["下载"] = "缓存"
                 state.phases["合成"] = "缓存"
+                state.phases["上传"] = "上传中"
                 await self._notice(sid, f"🔖 {state.job_id} 📤 缓存命中，发送中...")
-                state.phases["上传"] = "已完成"
-                state.phases["发送"] = "已完成"
                 from .napcat_stream import send_file_via_stream
                 send_result = await send_file_via_stream(
                     self.ctx, sid, user_id, cached.pdf_path,
                     is_group, group_id, self._upload_timeout,
                 )
+                state.phases["上传"] = "已完成"
+                state.phases["发送"] = "已完成"
                 state.status = "done"
                 state.result = {
                     "title": cached.title,
