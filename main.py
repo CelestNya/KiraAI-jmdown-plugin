@@ -33,7 +33,7 @@ class TaskState:
     target: str
     status: str = "running"  # running | done | failed
     phases: dict = field(default_factory=lambda: {
-        "下载": "待定", "合成": "待定", "上传": "待定", "发送": "待定",
+        "下载": "排队中", "合成": "排队中", "上传": "排队中", "发送": "排队中",
     })
     result: Optional[dict] = None
     error: Optional[str] = None
