@@ -18,5 +18,10 @@
         "type": "integer",
         "default": 300,
         "hint": "上传超时秒数（大文件建议 300+）"
+    },
+    "notify_llm": {
+        "type": "switch",
+        "default": true,
+        "hint": "任务完成后是否在目标会话触发 LLM 自动回复"
     }
 }
