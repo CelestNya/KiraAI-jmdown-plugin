@@ -84,12 +84,17 @@ def _fetch_album_meta(album_id: int) -> dict:
         if str(ep_id) != str(album_id):
             linked.append({"id": int(ep_id), "index": ep_idx, "title": ep_title or ""})
 
-    # 主本子自身页数 = 第一章节的图片数
+    # 真实页数需从 get_photo_detail 获取（get_album_detail 的 page_count 常为 0）
+    main_page_count = 0
     try:
-        first_ep = next(iter(album), None)
-        main_page_count = len(first_ep) if first_ep is not None else 0
-    except (TypeError, AttributeError):
-        main_page_count = 0
+        first_photo_id = album.episode_list[0][0] if album.episode_list else None
+        if first_photo_id:
+            photo = client.get_photo_detail(int(first_photo_id))
+            main_page_count = len(photo) if hasattr(photo, "__len__") else 0
+    except Exception:
+        pass
+    if main_page_count == 0:
+        main_page_count = getattr(album, "page_count", 0) or 0
 
     return {
         "album_id": album_id,
@@ -172,10 +177,15 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45,
         raise JMDownError(f"获取本子信息失败: {e}") from e
 
     # 注册下载进度回调（jmcomic 每下一张图触发 after_photo）
+    # 页数从 get_photo_detail 获取（get_album_detail 的 page_count 常为 0）
+    total_pages = 0
     try:
-        total_pages = len(next(iter(album_detail))) if album_detail else 0
-    except (TypeError, AttributeError):
-        total_pages = 0
+        first_pid = album_detail.episode_list[0][0] if album_detail.episode_list else None
+        if first_pid:
+            photo = client.get_photo_detail(int(first_pid))
+            total_pages = len(photo) if hasattr(photo, "__len__") else 0
+    except Exception:
+        pass
     _dl_state = [0, time.time()]  # [counter, start_time]
     if progress_cb and total_pages > 0:
         def _on_photo(*_):
