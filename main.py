@@ -363,8 +363,9 @@ class JMdownPlugin(BasePlugin):
                 pass
 
             threads = int(self.plugin_cfg.get("download_threads", 45))
-            _, image_dir, images, title, description = _download_images(
-                aid, self._download_dir, threads,
+            # jmcomic 同步阻塞 + 自建线程池, 丢到线程避免冻结事件循环 (ctrl+c 才能打断)
+            _, image_dir, images, title, description = await asyncio.to_thread(
+                _download_images, aid, self._download_dir, threads,
             )
             state.phases["下载"] = "已完成"
 
@@ -377,7 +378,9 @@ class JMdownPlugin(BasePlugin):
             def _pdf_progress(pct: int):
                 state.phases["合成"] = f"{pct}%"
 
-            size = _images_to_pdf(images, pdf_path, self._pdf_quality, _pdf_progress)
+            size = await asyncio.to_thread(
+                _images_to_pdf, images, pdf_path, self._pdf_quality, _pdf_progress,
+            )
             _rmtree(image_dir)
             state.phases["合成"] = "已完成"
 
