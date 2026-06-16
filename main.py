@@ -187,7 +187,6 @@ class JMdownPlugin(BasePlugin):
         self._max_cache: int = 10
         self._pdf_quality: int = 85
         self._desc_max_length: int = 80
-        self._stream_threshold: int = 10 * 1024 * 1024   # 10MB
         self._upload_timeout: int = 300
 
         # 后台任务系统
@@ -206,16 +205,11 @@ class JMdownPlugin(BasePlugin):
         self._max_cache = int(self.plugin_cfg.get("max_cache", 10))
         self._desc_max_length = int(self.plugin_cfg.get("desc_max_length", 80))
         self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
-        mb = int(self.plugin_cfg.get("stream_threshold_mb", 10))
-        self._stream_threshold = mb * 1024 * 1024
         self._upload_timeout = int(self.plugin_cfg.get("upload_timeout", 300))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
 
-        logger.info(
-            f"JMdown 就绪, 缓存上限 {self._max_cache} 本, "
-            f"流传输阈值 {mb}MB"
-        )
+        logger.info("JMdown 就绪")
 
     async def terminate(self):
         for aid, task in self._running_tasks.items():

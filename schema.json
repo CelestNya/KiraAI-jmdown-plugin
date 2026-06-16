@@ -14,11 +14,6 @@
         "default": 45,
         "hint": "下载图片的并行线程数"
     },
-    "stream_threshold_mb": {
-        "type": "integer",
-        "default": 10,
-        "hint": "超过此 MB 的 PDF 走流传输，避免 WebSocket 帧超限"
-    },
     "upload_timeout": {
         "type": "integer",
         "default": 300,
