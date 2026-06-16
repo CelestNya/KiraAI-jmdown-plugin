@@ -65,6 +65,34 @@ def _parse_target(target: str) -> tuple[str, bool, Optional[str]]:
     raise JMDownError(f"未知会话类型: {stype}, 应为 dm(私聊) 或 gm(群聊)")
 
 
+# ── 元信息查询 ──
+
+def _fetch_album_meta(album_id: int) -> dict:
+    """查询本子元信息, 不下载内容. 返回 dict."""
+    try:
+        client = jmcomic.JmOption.default().build_jm_client()
+        album = client.get_album_detail(album_id)
+    except jmcomic.jm_exception.MissingAlbumPhotoException:
+        raise JMDownError("该号码对应的本子不存在")
+    except Exception as e:
+        raise JMDownError(f"查询失败: {e}") from e
+
+    return {
+        "album_id": album_id,
+        "title": getattr(album, "name", str(album_id)),
+        "description": getattr(album, "description", ""),
+        "page_count": getattr(album, "page_count", 0),
+        "episode_count": len(getattr(album, "episode_list", [])),
+        "authors": list(getattr(album, "authors", [])),
+        "tags": list(getattr(album, "tags", [])),
+        "likes": getattr(album, "likes", ""),
+        "views": getattr(album, "views", ""),
+        "comment_count": getattr(album, "comment_count", 0),
+        "pub_date": getattr(album, "pub_date", ""),
+        "update_date": getattr(album, "update_date", ""),
+    }
+
+
 # ── 下载 & PDF ──
 
 def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tuple:
@@ -317,6 +345,66 @@ class JMdownPlugin(BasePlugin):
         if state:
             return self._format_state(state)
         return f"未找到任务: {job_id}"
+
+    # ── 工具: 查询本子元信息 ──
+
+    @tool(
+        "query_jm_album",
+        "查询禁漫本子元信息（标题、页数、作者、标签等），不下载内容。适用于了解本子基本资料",
+        {
+            "type": "object",
+            "properties": {
+                "album_id": {
+                    "type": "integer",
+                    "description": "禁漫本子数字 ID"
+                }
+            },
+            "required": ["album_id"]
+        }
+    )
+    async def query_jm_album(self, _event, album_id: int) -> str:
+        if album_id <= 0:
+            return "错误: album_id 须为正整数"
+        try:
+            info = _fetch_album_meta(album_id)
+        except JMDownError as e:
+            return f"错误: {e}"
+        return self._format_album_info(info)
+
+    def _format_album_info(self, info: dict) -> str:
+        ml = self._desc_max_length
+        desc = info.get("description", "")
+        if len(desc) > ml:
+            desc = desc[:ml] + "..."
+        lines = [
+            f"#{info['album_id']}",
+            f"标题: {info['title']}",
+        ]
+        # jmcomic 可能返回 ["N/A"], 过滤掉
+        authors = [a for a in info.get("authors", []) if a not in ("", "N/A", "none")]
+        if authors:
+            lines.append(f"作者: {', '.join(authors)}")
+        tags = info.get("tags", [])
+        if tags:
+            lines.append(f"标签: {', '.join(tags[:10])}{'...' if len(tags) > 10 else ''}")
+        pc = info.get("page_count", 0)
+        ep = info.get("episode_count", 0)
+        lines.append(f"页数: {pc if pc > 0 else '未知'}  章节: {ep}")
+        if info.get("likes") or info.get("views"):
+            likes = info.get("likes", "")
+            views = info.get("views", "")
+            comments = info.get("comment_count", 0)
+            lines.append(f"喜欢: {likes}  观看: {views}  评论: {comments}")
+        pub = info.get("pub_date", "")
+        upd = info.get("update_date", "")
+        if pub and pub != "0":
+            lines.append(f"发布: {pub}{'  更新: ' + upd if upd and upd != '0' else ''}")
+        if desc:
+            lines.append(f"---\n{desc}")
+        lines.append(
+            "---\n注: 若用户无特别要求，请不要给用户输出格式化文本或\"系统通知\""
+        )
+        return "\n".join(lines)
 
     def _format_state(self, s: TaskState) -> str:
         p = s.phases
