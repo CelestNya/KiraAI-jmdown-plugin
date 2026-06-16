@@ -83,7 +83,7 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     try:
         # 先 clent 直查 album, 在当前线程捕获 MissingAlbumPhotoException
         # (download_album 在多线程内部抛的异常传不出来)
-        opt.client.get_album_detail(album_id)
+        opt.build_jm_client().get_album_detail(album_id)
     except jmcomic.jm_exception.MissingAlbumPhotoException:
         raise JMDownError("该号码对应的本子不存在")
     except Exception as e:
