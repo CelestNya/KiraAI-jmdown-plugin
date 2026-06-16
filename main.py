@@ -77,12 +77,24 @@ def _fetch_album_meta(album_id: int) -> dict:
     except Exception as e:
         raise JMDownError(f"查询失败: {e}") from e
 
+    # 挂载的其他章节（与本子不同 ID 的额外内容）
+    episodes = getattr(album, "episode_list", [])
+    linked = []
+    for ep_id, ep_idx, ep_title in episodes:
+        if str(ep_id) != str(album_id):
+            linked.append({"id": int(ep_id), "index": ep_idx, "title": ep_title or ""})
+
+    # 主本子自身页数 = 第一章节的图片数
+    first_ep = next(iter(album), None)
+    main_page_count = len(first_ep) if first_ep is not None else 0
+
     return {
         "album_id": album_id,
         "title": getattr(album, "name", str(album_id)),
         "description": getattr(album, "description", ""),
-        "page_count": getattr(album, "page_count", 0),
-        "episode_count": len(getattr(album, "episode_list", [])),
+        "page_count": main_page_count,
+        "episode_count": len(episodes),
+        "linked_episodes": linked,      # 额外挂载的本子，供 LLM 决定是否下载
         "authors": list(getattr(album, "authors", [])),
         "tags": list(getattr(album, "tags", [])),
         "likes": getattr(album, "likes", ""),
@@ -129,19 +141,34 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     title = getattr(album_obj, "name", str(album_id))
     description = getattr(album_obj, "description", "")
 
-    # 多章节本子可能分多个子目录 (如 1164504/ + 1205945/), 递归扫全部
+    # 只读主本子目录，不管 jmcomic 挂了哪些额外章节
+    image_dir = download_dir / str(album_id)
+    if not image_dir.is_dir():
+        # 有时 jmcomic 会按 episode_id 建额外目录，删掉它们
+        for d in list(download_dir.iterdir()):
+            if d.is_dir() and d.name != str(album_id):
+                _rmtree(d)
+        if not image_dir.is_dir():
+            raise JMDownError(f"下载目录不存在: {image_dir}")
+
     valid = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
     images = sorted(
-        p for p in download_dir.rglob("*")
+        p for p in image_dir.rglob("*")
         if p.is_file() and p.suffix.lower() in valid
     )
-    expected = sum(len(ch) for ch in album_obj)
+    # 页数只算主本子的章节（episode_list[0] 即本子本身）
+    first_ep = next(iter(album_obj), None)
+    expected = len(first_ep) if first_ep is not None else 0
     if expected > 0 and len(images) != expected:
         raise JMDownError(f"页数不匹配: 实际 {len(images)} 张, 预期 {expected} 张")
     if not images:
-        raise JMDownError(f"下载完成但目录中无图片文件: {download_dir}")
+        raise JMDownError(f"下载完成但目录中无图片文件: {image_dir}")
+    # 清理 jmcomic 额外建的章节目录
+    for d in list(download_dir.iterdir()):
+        if d.is_dir() and d.name != str(album_id):
+            _rmtree(d)
 
-    return album_obj, download_dir, images, title, description
+    return album_obj, image_dir, images, title, description
 
 
 def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85,
@@ -176,6 +203,17 @@ def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85,
     finally:
         for t in temps:
             t.unlink(missing_ok=True)
+
+
+def _linked_episodes(album) -> list[dict]:
+    """提取 album 里挂载的额外本子信息。"""
+    episodes = getattr(album, "episode_list", [])
+    album_id = getattr(album, "album_id", None)
+    linked = []
+    for ep_id, ep_idx, ep_title in episodes:
+        if str(ep_id) != str(album_id):
+            linked.append({"id": int(ep_id), "index": ep_idx, "title": ep_title or ""})
+    return linked
 
 
 def _rmtree(dir_path: Path):
@@ -386,6 +424,14 @@ class JMdownPlugin(BasePlugin):
         pc = info.get("page_count", 0)
         ep = info.get("episode_count", 0)
         lines.append(f"页数: {pc if pc > 0 else '未知'}  章节: {ep}")
+        linked = info.get("linked_episodes", [])
+        if linked:
+            ep_info = "  |  ".join(
+                f"#{e['id']} ({e.get('title','') or '?'})"
+                for e in linked
+            )
+            lines.append(f"挂载章节: {ep_info}")
+            lines.append("(这些是作为该本子章节挂载的其他本子号，如有需要可单独下载)")
         if info.get("likes") or info.get("views"):
             likes = info.get("likes", "")
             views = info.get("views", "")
@@ -416,10 +462,12 @@ class JMdownPlugin(BasePlugin):
             desc = r.get("description", "")
             if len(desc) > ml:
                 desc = desc[:ml] + "..."
+            linked = r.get("linked_episodes", [])
+            ep_str = ("  挂载: " + ", ".join(f"#{e['id']}" for e in linked)) if linked else ""
             lines.extend([
                 f"标题: {r.get('title', '')}",
                 f"描述: {desc or '无描述'}",
-                f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}",
+                f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}{ep_str}",
             ])
         if s.status == "failed" and s.error:
             lines.append(f"错误: {s.error}")
@@ -475,7 +523,7 @@ class JMdownPlugin(BasePlugin):
 
             threads = int(self.plugin_cfg.get("download_threads", 45))
             # jmcomic 同步阻塞 + 自建线程池, 丢到线程避免冻结事件循环 (ctrl+c 才能打断)
-            _, image_dir, images, title, description = await asyncio.to_thread(
+            album_obj, image_dir, images, title, description = await asyncio.to_thread(
                 _download_images, aid, self._download_dir, threads,
             )
             state.phases["下载"] = "已完成"
@@ -525,6 +573,7 @@ class JMdownPlugin(BasePlugin):
 
             state.status = "done"
             state.elapsed = time.time() - state.started_at
+            linked = _linked_episodes(album_obj)
             state.result = {
                 "title": title,
                 "description": description,
@@ -532,6 +581,7 @@ class JMdownPlugin(BasePlugin):
                 "file_size": size,
                 "send_result": send_result,
                 "from_cache": False,
+                "linked_episodes": linked,
             }
 
             await self._send_completion_notice(sid, state)
@@ -560,11 +610,17 @@ class JMdownPlugin(BasePlugin):
             desc = r.get("description", "")
             if len(desc) > ml:
                 desc = desc[:ml] + "..."
+            linked = r.get("linked_episodes", [])
+            extra = ""
+            if linked:
+                ep_str = ", ".join(f"#{e['id']}" for e in linked)
+                extra = f"挂载章节: {ep_str}\n"
             return (
                 f"任务 [{s.job_id}] #{s.album_id} 全部完成\n"
                 f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}\n"
                 f"标题: {r.get('title', '')}\n"
                 f"描述: {desc or '无描述'}\n"
+                f"{extra}"
                 f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
                 f"---\n"
                 f"注: 若用户无特别要求，请不要给用户输出格式化文本或\"系统通知\""
