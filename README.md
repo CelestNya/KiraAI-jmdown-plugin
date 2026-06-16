@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.2.0-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.3.0-blue)](manifest.json)
 
 **jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 分片流传输发送到 QQ。
 
@@ -58,6 +58,16 @@ pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6
   target   (string)  — 目标会话，格式 "adapter:type:id"
                        示例: qq:dm:123456（私聊）、qq:gm:789012（群聊）
 返回: 任务标识码 JOB-YYMMDD-NNN
+```
+
+### 工具：`query_jm_album`
+
+查询本子元信息（标题、作者、标签、页数等），不下载内容。
+
+```
+参数:
+  album_id (integer) — 禁漫本子数字 ID
+返回: 标题、作者、标签、页数、章节、喜欢/观看/评论、描述
 ```
 
 ### 工具：`query_jm_task`
