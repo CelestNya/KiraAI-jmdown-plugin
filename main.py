@@ -197,46 +197,35 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45,
             progress_cb(pct, _fmt(avg_speed) + "/s")
         opt.plugins.after_photo = [_on_photo]
 
-    # 确认存在后再进下载(会开线程池, 异常出不来的)
+    # 用 download_photo 只下单章（不下挂载章节），避免覆盖
     try:
-        result_set = opt.download_album([album_id])
+        photo_detail, _downloader = opt.download_photo(album_id)
     except Exception as e:
         raise JMDownError(f"下载失败: {e}") from e
-    if not result_set:
-        raise JMDownError("该号码对应的本子不存在或下载失败")
 
-    album_obj = next(iter(result_set))[0]
-    title = getattr(album_obj, "name", str(album_id))
-    description = getattr(album_obj, "description", "")
+    # photo_detail 不含 parent album 的元信息，从预查的 album_detail 拿
+    title = getattr(album_detail, "name", str(album_id))
+    description = getattr(album_detail, "description", "")
 
-    # 只读主本子目录，不管 jmcomic 挂了哪些额外章节
     image_dir = download_dir / str(album_id)
     if not image_dir.is_dir():
-        # 有时 jmcomic 会按 episode_id 建额外目录，删掉它们
-        for d in list(download_dir.iterdir()):
-            if d.is_dir() and d.name != str(album_id):
-                _rmtree(d)
-        if not image_dir.is_dir():
-            raise JMDownError(f"下载目录不存在: {image_dir}")
+        raise JMDownError(f"下载目录不存在: {image_dir}")
 
+    # page_arr 就是精确的文件名列表（如 ["00001.webp", ..., "00079.webp"]）
     valid = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
+    expected_stems = {Path(p).stem for p in (photo_detail.page_arr or [])}
     images = sorted(
         p for p in image_dir.rglob("*")
         if p.is_file() and p.suffix.lower() in valid
+        and p.stem in expected_stems
     )
-    # 页数只算主本子的章节（episode_list[0] 即本子本身）
-    first_ep = next(iter(album_obj), None)
-    expected = len(first_ep) if first_ep is not None else 0
+    expected = len(expected_stems)
     if expected > 0 and len(images) != expected:
         raise JMDownError(f"页数不匹配: 实际 {len(images)} 张, 预期 {expected} 张")
     if not images:
         raise JMDownError(f"下载完成但目录中无图片文件: {image_dir}")
-    # 清理 jmcomic 额外建的章节目录
-    for d in list(download_dir.iterdir()):
-        if d.is_dir() and d.name != str(album_id):
-            _rmtree(d)
 
-    return album_obj, image_dir, images, title, description
+    return album_detail, image_dir, images, title, description
 
 
 def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85,
