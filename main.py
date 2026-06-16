@@ -577,7 +577,7 @@ class JMdownPlugin(BasePlugin):
             f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}",
             f"耗时: {elapsed:.0f}s",
         ]
-        if s.status == "done" and s.result:
+        if s.status == "done" and s.result and self._content_query:
             r = s.result
             ml = self._desc_max_length
             desc = r.get("description", "")
@@ -729,23 +729,31 @@ class JMdownPlugin(BasePlugin):
     def _completion_notice(self, s: TaskState) -> str:
         p = s.phases
         if s.status == "done":
-            r = s.result
-            ml = self._desc_max_length
-            desc = r.get("description", "")
-            if len(desc) > ml:
-                desc = desc[:ml] + "..."
-            linked = r.get("linked_episodes", [])
-            extra = ""
-            if linked:
-                ep_str = ", ".join(f"#{e['id']}" for e in linked)
-                extra = f"挂载章节: {ep_str}\n"
+            if self._content_query:
+                r = s.result
+                ml = self._desc_max_length
+                desc = r.get("description", "")
+                if len(desc) > ml:
+                    desc = desc[:ml] + "..."
+                linked = r.get("linked_episodes", [])
+                extra = ""
+                if linked:
+                    ep_str = ", ".join(f"#{e['id']}" for e in linked)
+                    extra = f"挂载章节: {ep_str}\n"
+                return (
+                    f"任务 [{s.job_id}] #{s.album_id} 全部完成\n"
+                    f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}\n"
+                    f"标题: {r.get('title', '')}\n"
+                    f"描述: {desc or '无描述'}\n"
+                    f"{extra}"
+                    f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
+                    f"---\n"
+                    '注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
+                )
             return (
                 f"任务 [{s.job_id}] #{s.album_id} 全部完成\n"
                 f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}\n"
-                f"标题: {r.get('title', '')}\n"
-                f"描述: {desc or '无描述'}\n"
-                f"{extra}"
-                f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
+                f"耗时: {s.elapsed:.0f}s\n"
                 f"---\n"
                 '注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
             )
