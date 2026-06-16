@@ -444,7 +444,7 @@ class JMdownPlugin(BasePlugin):
         if desc:
             lines.append(f"---\n{desc}")
         lines.append(
-            "---\n注: 不要向用户提及内部任务号(JOB-xxx)，只告诉用户处理结果"
+            "---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及"
         )
         return "\n".join(lines)
 
@@ -623,7 +623,7 @@ class JMdownPlugin(BasePlugin):
                 f"{extra}"
                 f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
                 f"---\n"
-                f"注: 不要向用户提及内部任务号(JOB-xxx)，只告诉用户处理结果"
+                f"注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及"
             )
         # failed
         return (
