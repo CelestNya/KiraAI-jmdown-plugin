@@ -339,8 +339,8 @@ class JMdownPlugin(BasePlugin):
                 state.phases["上传"] = "0%"
                 await self._notice(sid, f"🔖 {state.job_id} 📤 缓存命中，发送中...")
 
-                async def _cache_upload_progress(pct: int):
-                    state.phases["上传"] = f"{pct}%"
+                async def _cache_upload_progress(pct: int, spd: str):
+                    state.phases["上传"] = f"{pct}% ({spd})"
 
                 from .napcat_stream import send_file_via_stream
                 send_result = await send_file_via_stream(
@@ -404,8 +404,8 @@ class JMdownPlugin(BasePlugin):
             state.phases["合成"] = "已完成"
             state.phases["上传"] = "0%"
 
-            async def _upload_progress(pct: int):
-                state.phases["上传"] = f"{pct}%"
+            async def _upload_progress(pct: int, spd: str):
+                state.phases["上传"] = f"{pct}% ({spd})"
 
             from .napcat_stream import send_file_via_stream
             send_result = await send_file_via_stream(

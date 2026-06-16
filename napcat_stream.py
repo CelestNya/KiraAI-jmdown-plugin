@@ -9,13 +9,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import os
 import time
 from typing import Optional
 
 from core.plugin import logger
 
-CHUNK_SIZE = 64 * 1024  # 64KB — NapCat 帧安全大小
+CHUNK_SIZE = 512 * 1024  # 512KB — 减少 round-trip 次数, NapCat 帧上限 16MB
 
 
 def _find_qq_adapter(adapter_mgr):
@@ -43,20 +44,24 @@ async def stream_upload_file(
     client: NapCatWebSocketClient 实例（已有 WS 连接）
     file_path: 本地 PDF 绝对路径
     timeout: 单次 send_action 超时
-    progress_cb: async callable(pct: int) 每 25% 回调一次
+    progress_cb: async callable(pct: int, speed_str: str) 每 25% 回调
     """
     file_size = os.path.getsize(file_path)
     total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
     stream_id = f"jmdown_{int(time.time())}_{os.path.basename(file_path)}"
 
-    sha256 = hashlib.sha256()
+    logger.info(f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})")
+
+    # expected_sha256 必须为完整文件 hash, 所有分片传同一个值
+    full_sha256 = hashlib.sha256(open(file_path, "rb").read()).hexdigest()
     remote_path: Optional[str] = None
-    last_reported_pct = -1
+    t0 = time.time()
+    report_every = max(1, total_chunks // 20)  # 约 20 次通知
 
     with open(file_path, "rb") as f:
         for i in range(total_chunks):
+            chunk_start = time.time()
             chunk = f.read(CHUNK_SIZE)
-            sha256.update(chunk)
             chunk_b64 = base64.b64encode(chunk).decode()
 
             params = {
@@ -65,7 +70,8 @@ async def stream_upload_file(
                 "chunk_index": i,
                 "total_chunks": total_chunks,
                 "file_size": file_size,
-                "expected_sha256": sha256.hexdigest(),
+                "expected_sha256": full_sha256,
+                "filename": os.path.basename(file_path),
             }
 
             resp = await client.send_action("upload_file_stream", params, timeout=timeout)
@@ -76,20 +82,35 @@ async def stream_upload_file(
                     f"status={status} data={resp.get('data', {})}"
                 )
 
-            # 每 25% 回调一次
-            if progress_cb:
-                pct = int((i + 1) / total_chunks * 100)
-                report = pct // 25
-                if report > last_reported_pct:
-                    last_reported_pct = report
-                    await progress_cb(min(pct, 100))
+            # 报告进度
+            if progress_cb and (
+                i == 0 or i == total_chunks - 1 or i % report_every == 0
+            ):
+                chunk_elapsed = time.time() - chunk_start
+                inst_speed = len(chunk) / chunk_elapsed if chunk_elapsed > 0 else 0
+                pct = min(int((i + 1) / total_chunks * 100), 100)
+                avg_speed = (CHUNK_SIZE * (i + 1)) / (time.time() - t0) if (time.time() - t0) > 0 else 0
+                speed_str = _fmt(avg_speed) + f"/s"
+                await progress_cb(pct, speed_str)
 
-            # 最后一片才返回 file_path
-            if i == total_chunks - 1:
-                remote_path = resp.get("data", {}).get("file_path", "")
-
+    # ── 所有块发送完成，通知 NapCat 组装文件 ──
+    logger.info("All chunks sent, signaling completion ...")
+    complete_resp = await client.send_action("upload_file_stream", {
+        "stream_id": stream_id,
+        "is_complete": True,
+    }, timeout=timeout)
+    status = complete_resp.get("status", "")
+    if status != "ok":
+        raise RuntimeError(
+            f"Stream completion signal failed: "
+            f"status={status} data={complete_resp.get('data', {})}"
+        )
+    remote_path = complete_resp.get("data", {}).get("file_path", "")
     if not remote_path:
-        raise RuntimeError("Stream upload completed but no file_path in response")
+        raise RuntimeError(
+            f"Stream completed but no file_path in response: "
+            f"{json.dumps(complete_resp, ensure_ascii=False)}"
+        )
 
     return remote_path
 
