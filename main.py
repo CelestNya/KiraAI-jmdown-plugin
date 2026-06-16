@@ -80,13 +80,21 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     opt.plugins.after_album = []
 
     try:
+        # 先 clent 直查 album, 在当前线程捕获 MissingAlbumPhotoException
+        # (download_album 在多线程内部抛的异常传不出来)
+        opt.client.get_album_detail(album_id)
+    except jmcomic.jm_exception.MissingAlbumPhotoException:
+        raise JMDownError("该号码对应的本子不存在")
+    except Exception as e:
+        raise JMDownError(f"获取本子信息失败: {e}") from e
+
+    # 确认存在后再进下载(会开线程池, 异常出不来的)
+    try:
         result_set = opt.download_album([album_id])
-    except jmcomic.jm_exception.MissingAlbumPhotoException as e:
-        raise JMDownError(f"该号码对应的本子不存在") from e
     except Exception as e:
         raise JMDownError(f"下载失败: {e}") from e
     if not result_set:
-        raise JMDownError("下载返回空结果")
+        raise JMDownError("该号码对应的本子不存在或下载失败")
 
     album_obj = next(iter(result_set))[0]
     title = getattr(album_obj, "name", str(album_id))
