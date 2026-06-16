@@ -70,6 +70,9 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     """下载图片, 返回 (album_obj, image_dir, images[], title, desc)."""
     opt = jmcomic.JmOption.default()
     opt.dir_rule.base_dir = str(download_dir.resolve())
+    # Bd_Aid: 按 album_id 建目录，不依赖标题
+    opt.dir_rule.rule_dsl = "Bd_Aid"
+    opt.dir_rule.parser_list = opt.dir_rule.get_rule_parser_list("Bd_Aid")
     opt.download.image.suffix = ".jpg"
     opt.download.image.decode = True
     opt.download.threading.image = threads
@@ -87,22 +90,21 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     title = getattr(album_obj, "name", str(album_id))
     description = getattr(album_obj, "description", "")
 
-    # 计算总页数（album.page_count 可能为 0，需累加各章）
-    total_pages = sum(len(chapter) for chapter in album_obj)
+    # 目录由 Bd_Aid 规则决定: {download_dir}/{album_id}/
+    image_dir = download_dir / str(album_id)
+    if not image_dir.is_dir():
+        raise JMDownError(f"下载目录不存在: {image_dir}")
 
-    # 找到实际下载目录（默认 Bd_Pname 规则，目录名 = 本子标题）
     valid = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
-    image_dir: Optional[Path] = None
-    for d in download_dir.iterdir():
-        if not d.is_dir():
-            continue
-        imgs = [p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in valid]
-        if len(imgs) == total_pages:
-            image_dir = d
-            images = sorted(imgs)
-            break
-    if image_dir is None:
-        raise JMDownError(f"下载完成但未找到含 {total_pages} 张图片的目录")
+    images = sorted(
+        p for p in image_dir.rglob("*")
+        if p.is_file() and p.suffix.lower() in valid
+    )
+    expected = sum(len(ch) for ch in album_obj)
+    if expected > 0 and len(images) != expected:
+        raise JMDownError(f"页数不匹配: 实际 {len(images)} 张, 预期 {expected} 张")
+    if not images:
+        raise JMDownError(f"下载完成但目录中无图片文件: {image_dir}")
 
     return album_obj, image_dir, images, title, description
 
