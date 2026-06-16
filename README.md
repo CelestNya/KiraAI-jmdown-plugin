@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.4.0-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.5.0-blue)](manifest.json)
 
 **jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 分片流传输发送到 QQ。
 
@@ -15,7 +15,7 @@
 | 阶段 | 说明 |
 |------|------|
 | 提交任务 | LLM 调用 `send_jm_album` 工具，返回 `JOB-YYMMDD-NNN` 标识码 |
-| 下载 | jmcomic 库并行下载图片，按 album_id 建目录 |
+| 下载 | jmcomic 库并行下载图片，按 album_id 建目录，实时百分比+速度 |
 | 合成 | img2pdf + Pillow 合成为 PDF，实时报进度 |
 | 上传 | NapCat Stream API 分片上传（512KB/片），绕过 WS 帧限制 |
 | 发送 | `upload_private_file` / `upload_group_file` 发送给目标 |
@@ -58,6 +58,21 @@ pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6
   target   (string)  — 目标会话，格式 "adapter:type:id"
                        示例: qq:dm:123456（私聊）、qq:gm:789012（群聊）
 返回: 任务标识码 JOB-YYMMDD-NNN
+```
+
+### 工具：`search_jm_album`
+
+搜索禁漫本子，返回标题、ID、标签。
+
+```
+参数:
+  keyword  (string) — 搜索关键词，多词空格分隔（必填其一）
+  tag      (string) — 按标签搜索（必填其一）
+  author   (string) — 按作者搜索（必填其一）
+  work     (string) — 按作品搜索（必填其一）
+  page     (integer) — 页码，默认第1页
+  order_by (enum)   — 排序: relevance/views/likes
+返回: 搜索结果列表，含 ID、标题、标签
 ```
 
 ### 工具：`query_jm_album`
