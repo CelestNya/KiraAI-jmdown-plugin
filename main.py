@@ -173,7 +173,7 @@ class JMdownPlugin(BasePlugin):
         self._upload_timeout: int = 300
 
         # 后台任务系统
-        self._task_registry: dict[int, TaskState] = {}
+        self._task_registry: dict[str, TaskState] = {}   # job_id → state
         self._task_counter: int = 0
         self._running_tasks: dict[int, asyncio.Task] = {}   # album_id → task
 
@@ -196,10 +196,12 @@ class JMdownPlugin(BasePlugin):
         logger.info("JMdown 就绪")
 
     async def terminate(self):
-        for aid, task in self._running_tasks.items():
-            if not task.done():
-                task.cancel()
-                logger.info(f"终止后台任务: #{aid}")
+        tasks = [t for t in self._running_tasks.values() if not t.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            # 等被 cancel 的任务真正退出, 吞掉 CancelledError
+            await asyncio.gather(*tasks, return_exceptions=True)
         self._running_tasks.clear()
         logger.info("JMdown 已终止")
 
@@ -248,10 +250,14 @@ class JMdownPlugin(BasePlugin):
 
         # 去重: 同一 album_id 正在运行则复用
         if album_id in self._running_tasks and not self._running_tasks[album_id].done():
-            existing = self._task_registry.get(album_id)
+            existing = next(
+                (s for s in self._task_registry.values()
+                 if s.album_id == album_id and s.status == "running"),
+                None,
+            )
             if existing:
-                return f"⚠️ #{album_id} 已在下载队列中，标识码: {existing.job_id}"
-            return f"⚠️ #{album_id} 已在下载队列中"
+                return f"#{album_id} 已在下载队列中，标识码: {existing.job_id}"
+            return f"#{album_id} 已在下载队列中"
 
         # 生成 Job ID
         self._task_counter += 1
@@ -260,7 +266,7 @@ class JMdownPlugin(BasePlugin):
         _parse_target(target)  # 提前校验 target 格式
 
         state = TaskState(job_id=job_id, album_id=album_id, target=target)
-        self._task_registry[album_id] = state
+        self._task_registry[job_id] = state
 
         task = asyncio.create_task(self._task_runner(state))
         self._running_tasks[album_id] = task
@@ -285,10 +291,9 @@ class JMdownPlugin(BasePlugin):
         }
     )
     async def query_jm_task(self, _event, job_id: str) -> str:
-        # 线性扫描 — 任务数很少
-        for state in self._task_registry.values():
-            if state.job_id == job_id:
-                return self._format_state(state)
+        state = self._task_registry.get(job_id)
+        if state:
+            return self._format_state(state)
         return f"未找到任务: {job_id}"
 
     def _format_state(self, s: TaskState) -> str:
@@ -351,7 +356,6 @@ class JMdownPlugin(BasePlugin):
                     "from_cache": True,
                 }
                 await self._send_completion_notice(sid, state)
-                self._cleanup_task(aid)
                 return
 
             # ── 2. 下载 ──
@@ -395,7 +399,6 @@ class JMdownPlugin(BasePlugin):
 
             # ── 4. 上传 NapCat temp ──
             await self._notice(sid, f"[{state.job_id}] 上传中...")
-            state.phases["合成"] = "已完成"
             state.phases["上传"] = "0%"
 
             async def _upload_progress(pct: int, spd: str):
@@ -432,11 +435,11 @@ class JMdownPlugin(BasePlugin):
             logger.error(f"#{aid} 后台任务失败: {e}")
             await self._send_completion_notice(sid, state)
         finally:
-            self._cleanup_task(aid)
+            self._cleanup_task(state)
 
-    def _cleanup_task(self, album_id: int):
-        self._running_tasks.pop(album_id, None)
-        # state 留 registry 供 query_jm_task 查询，上限 30 条
+    def _cleanup_task(self, state: TaskState):
+        self._running_tasks.pop(state.album_id, None)
+        # state 留 registry 供 query_jm_task 查询，按 job_id 上限 30 条
         if len(self._task_registry) > 30:
             for key in list(self._task_registry)[:-30]:
                 self._task_registry.pop(key, None)
