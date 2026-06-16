@@ -8,6 +8,7 @@ JMComic 下载器 — KiraAI 插件
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -179,6 +180,7 @@ class JMdownPlugin(BasePlugin):
         self._pdf_quality: int = 85
         self._desc_max_length: int = 80
         self._upload_timeout: int = 300
+        self._chunk_size: int = 512 * 1024
 
         # 后台任务系统
         self._task_registry: dict[str, TaskState] = {}   # job_id → state
@@ -197,9 +199,13 @@ class JMdownPlugin(BasePlugin):
         self._desc_max_length = int(self.plugin_cfg.get("desc_max_length", 80))
         self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
         self._upload_timeout = int(self.plugin_cfg.get("upload_timeout", 300))
+        self._chunk_size = int(self.plugin_cfg.get("chunk_size", 512 * 1024))
         self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
+
+        # 静音 jmcomic 的冗赘日志（下载进度、API 报错等）
+        logging.getLogger("jmcomic").setLevel(logging.WARNING)
 
         logger.info("JMdown 就绪")
 
@@ -351,6 +357,7 @@ class JMdownPlugin(BasePlugin):
                     self.ctx, sid, user_id, cached.pdf_path,
                     is_group, group_id, self._upload_timeout,
                     progress_cb=_cache_upload_progress,
+                    chunk_size=self._chunk_size,
                 )
                 state.phases["上传"] = "已完成"
                 state.phases["发送"] = "已完成"
@@ -417,6 +424,7 @@ class JMdownPlugin(BasePlugin):
                 self.ctx, sid, user_id, str(pdf_path.resolve()),
                 is_group, group_id, self._upload_timeout,
                 progress_cb=_upload_progress,
+                chunk_size=self._chunk_size,
             )
             state.phases["上传"] = "已完成"
 
