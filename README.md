@@ -134,10 +134,13 @@ LLM → 告知用户任务已提交
 
 ## 技术要点
 
-- 大文件上传走 NapCat Stream API（分片 + `is_complete` 组装），非旧版 base64 直传
+- 大文件上传走 NapCat Stream API（分片 + `is_complete` 组装），分片大小可配置
 - 目录规则使用 `Bd_Aid`（按 album_id 命名），不依赖标题
-- 页数校验：`sum(len(ch) for ch in album_obj)` vs 实际图片数，不匹配则报错
-- Background task 绕过 KiraAI tool 60s 超时限制
+- 页数从 `get_photo_detail.page_arr` 获取，确保与实际下载文件精确匹配
+- 使用 `download_photo` 只下单章，挂载章节（分P本子）不自动下载，ID 暴露给 LLM 决定
+- 下载/合成/上传三阶段均实时显示百分比和速度
+- 后台任务（Background task）绕过 KiraAI tool 60s 超时限制
+- `content_query` 开关关闭时，搜索、元信息查询、完成通知中的元数据全部隐藏，仅保留下载发送功能
 
 ## 项目结构
 
