@@ -83,47 +83,18 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     title = getattr(album_obj, "name", str(album_id))
     description = getattr(album_obj, "description", "")
 
-    # 找图片目录: 扫 download_dir 下最新有图的子目录
-    image_dir: Optional[Path] = None
-    candidates = sorted(
-        d for d in download_dir.iterdir()
-        if d.is_dir()
-    )
-    # 优先 Aid 规则目录, 其次含 ID 的, 最后最新的
-    for d in candidates:
-        if d.name == str(album_id):
-            image_dir = d
-            break
-    if image_dir is None:
-        for d in candidates:
-            if str(album_id) in d.name:
-                image_dir = d
-                break
-    if image_dir is None:
-        # 取最新有图片的子目录
-        for d in reversed(candidates):
-            has_img = any(
-                p.is_file() and p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-                for p in d.iterdir()
-            )
-            if has_img:
-                image_dir = d
-                break
-    if image_dir is None:
-        raise JMDownError("下载完成但找不到图片目录")
+    # 目录由 Aid 规则决定: {base_dir}/{album_id}/
+    image_dir = download_dir / str(album_id)
+    if not image_dir.is_dir():
+        raise JMDownError(f"下载目录不存在: {image_dir}")
 
     valid = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
     images = sorted(
-        p for p in image_dir.iterdir()
+        p for p in image_dir.rglob("*")
         if p.is_file() and p.suffix.lower() in valid
     )
     if not images:
-        images = sorted(
-            p for p in image_dir.rglob("*")
-            if p.is_file() and p.suffix.lower() in valid
-        )
-    if not images:
-        raise JMDownError("下载完成但目录中无图片文件")
+        raise JMDownError(f"下载完成但目录中无图片文件: {image_dir}")
 
     return album_obj, image_dir, images, title, description
 
@@ -206,6 +177,7 @@ class JMdownPlugin(BasePlugin):
         self._desc_max_length = int(self.plugin_cfg.get("desc_max_length", 80))
         self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
         self._upload_timeout = int(self.plugin_cfg.get("upload_timeout", 300))
+        self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
 
@@ -219,14 +191,21 @@ class JMdownPlugin(BasePlugin):
         self._running_tasks.clear()
         logger.info("JMdown 已终止")
 
-    async def _notice(self, sid: str, text: str):
-        """通过会话发送进度通知，LLM 后续能看见。"""
+    async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
+        """通过会话发送进度通知。mentioned=True 会触发目标会话 LLM 回复。"""
         if not sid:
             return
         try:
-            await self.ctx.publish_notice(sid, MessageChain([Text(text)]), is_mentioned=False)
+            await self.ctx.publish_notice(sid, MessageChain([Text(text)]), is_mentioned=mentioned)
         except Exception:
             pass  # 通知失败不中断主流程
+
+    async def _send_completion_notice(self, sid: str, state: TaskState):
+        """notify_llm=true 则触发 LLM 回复，false 仅静默通知。"""
+        if self._notify_llm:
+            await self._notice(sid, self._completion_notice(state), mentioned=True)
+        else:
+            await self._notice(sid, self._completion_notice(state), mentioned=False)
 
     # ── 工具: 提交下载任务 ──
 
@@ -275,7 +254,7 @@ class JMdownPlugin(BasePlugin):
         self._running_tasks[album_id] = task
 
         logger.info(f"#{album_id} 入队列 → {job_id}")
-        return f"🔖 任务已加入队列\n标识码: {job_id}"
+        return f"任务已加入队列\n标识码: {job_id}"
 
     # ── 工具: 查询任务状态 ──
 
@@ -298,15 +277,15 @@ class JMdownPlugin(BasePlugin):
         for state in self._task_registry.values():
             if state.job_id == job_id:
                 return self._format_state(state)
-        return f"❌ 未找到任务: {job_id}"
+        return f"未找到任务: {job_id}"
 
     def _format_state(self, s: TaskState) -> str:
         p = s.phases
         elapsed = time.time() - s.started_at
         lines = [
-            f"{'✅' if s.status == 'done' else '❌' if s.status == 'failed' else '🔖'} {s.job_id}",
+            f"{'[完成]' if s.status == 'done' else '[失败]' if s.status == 'failed' else '[进行中]'} {s.job_id}",
             f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}",
-            f"⏱ {elapsed:.0f}s",
+            f"耗时: {elapsed:.0f}s",
         ]
         if s.status == "done" and s.result:
             r = s.result
@@ -315,12 +294,12 @@ class JMdownPlugin(BasePlugin):
             if len(desc) > ml:
                 desc = desc[:ml] + "..."
             lines.extend([
-                f"📖 {r.get('title', '')}",
-                f"📝 {desc or '无描述'}",
-                f"📄 {r.get('page_count', 0)} 页  💾 {self._fmt(r.get('file_size', 0))}",
+                f"标题: {r.get('title', '')}",
+                f"描述: {desc or '无描述'}",
+                f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}",
             ])
         if s.status == "failed" and s.error:
-            lines.append(f"🚫 {s.error}")
+            lines.append(f"错误: {s.error}")
         return "\n".join(lines)
 
     # ── 后台任务 ──
@@ -337,7 +316,7 @@ class JMdownPlugin(BasePlugin):
                 state.phases["下载"] = "缓存"
                 state.phases["合成"] = "缓存"
                 state.phases["上传"] = "0%"
-                await self._notice(sid, f"🔖 {state.job_id} 📤 缓存命中，发送中...")
+                await self._notice(sid, f"缓存命中 [{state.job_id}], 发送中...")
 
                 async def _cache_upload_progress(pct: int, spd: str):
                     state.phases["上传"] = f"{pct}% ({spd})"
@@ -359,12 +338,12 @@ class JMdownPlugin(BasePlugin):
                     "send_result": send_result,
                     "from_cache": True,
                 }
-                await self._notice(sid, self._completion_notice(state))
+                await self._send_completion_notice(sid, state)
                 self._cleanup_task(aid)
                 return
 
             # ── 2. 下载 ──
-            await self._notice(sid, f"🔖 {state.job_id} ⏬ 下载 #{aid} ...")
+            await self._notice(sid, f"[{state.job_id}] 下载 #{aid} ...")
             state.phases["下载"] = "进行中"
 
             def _update_download(*_):
@@ -378,7 +357,7 @@ class JMdownPlugin(BasePlugin):
             state.phases["下载"] = "已完成"
 
             # ── 3. 合成 PDF ──
-            await self._notice(sid, f"🔖 {state.job_id} 📄 合成 PDF ({len(images)} 页)...")
+            await self._notice(sid, f"[{state.job_id}] 合成 PDF ({len(images)} 页)...")
             state.phases["合成"] = "0%"
 
             pdf_path = self._cache_dir / f"{aid}.pdf"
@@ -400,7 +379,7 @@ class JMdownPlugin(BasePlugin):
             self._evict_cleanup(evicted)
 
             # ── 4. 上传 NapCat temp ──
-            await self._notice(sid, f"🔖 {state.job_id} 📤 上传中...")
+            await self._notice(sid, f"[{state.job_id}] 上传中...")
             state.phases["合成"] = "已完成"
             state.phases["上传"] = "0%"
 
@@ -429,14 +408,14 @@ class JMdownPlugin(BasePlugin):
                 "from_cache": False,
             }
 
-            await self._notice(sid, self._completion_notice(state))
+            await self._send_completion_notice(sid, state)
 
         except Exception as e:
             state.status = "failed"
             state.elapsed = time.time() - state.started_at
             state.error = str(e)
             logger.error(f"#{aid} 后台任务失败: {e}")
-            await self._notice(sid, self._completion_notice(state))
+            await self._send_completion_notice(sid, state)
         finally:
             self._cleanup_task(aid)
 
@@ -456,17 +435,19 @@ class JMdownPlugin(BasePlugin):
             if len(desc) > ml:
                 desc = desc[:ml] + "..."
             return (
-                f"🔔 任务完成 {s.job_id}\n"
+                f"任务 [{s.job_id}] #{s.album_id} 全部完成\n"
                 f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}\n"
-                f"📖 {r.get('title', '')}\n"
-                f"📝 {desc or '无描述'}\n"
-                f"📄 {r.get('page_count', 0)} 页  💾 {self._fmt(r.get('file_size', 0))}  ⏱ {s.elapsed:.0f}s"
+                f"标题: {r.get('title', '')}\n"
+                f"描述: {desc or '无描述'}\n"
+                f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
+                f"---\n"
+                f"注: 若用户无特别要求，请不要给用户输出格式化文本或\"系统通知\""
             )
         # failed
         return (
-            f"🔔 任务失败 {s.job_id}\n"
+            f"任务 [{s.job_id}] #{s.album_id} 失败\n"
             f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}\n"
-            f"🚫 {s.error}"
+            f"错误: {s.error}"
         )
 
     def _evict_cleanup(self, entries: list[CacheEntry]):
