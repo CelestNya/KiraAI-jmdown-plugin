@@ -18,6 +18,20 @@ from core.plugin import logger
 CHUNK_SIZE = 64 * 1024  # 64KB — NapCat 帧安全大小
 
 
+def _find_qq_adapter(adapter_mgr):
+    """遍历已注册 adapter，返回 platform=QQ 的实例（不依赖硬编码注册名）"""
+    adapters = adapter_mgr.get_adapters()
+    for name, inst in adapters.items():
+        if getattr(inst, "info", None) and inst.info.platform.upper() == "QQ":
+            logger.info(f"Found QQ adapter: name={name!r}, platform={inst.info.platform!r}")
+            return inst
+    logger.warning(
+        f"QQ adapter not found. Available: "
+        f"{[(n, getattr(a, 'info', None) and a.info.platform) for n, a in adapters.items()]}"
+    )
+    return None
+
+
 async def stream_upload_file(client, file_path: str, timeout: int = 300) -> str:
     """upload_file_stream: 分片上传 → 返回 NapCat 远端 temp 路径.
 
@@ -78,8 +92,8 @@ async def send_file_via_stream(
 
     返回人类可读的结果文本。
     """
-    # adapter 注册 key = config 中 name 字段, 当前为 "qq" (小写)
-    adapter = ctx.adapter_mgr.get_adapter("qq")
+    # 动态查找 platform=QQ 的 adapter，不硬编码注册名
+    adapter = _find_qq_adapter(ctx.adapter_mgr)
     if adapter is None:
         raise RuntimeError("QQ 适配器不可用，无法流传输")
     client = adapter.get_client()

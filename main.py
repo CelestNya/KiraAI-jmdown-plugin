@@ -26,6 +26,24 @@ class JMDownError(Exception):
     """插件业务异常"""
 
 
+def _parse_target(target: str) -> tuple[str, bool, Optional[str]]:
+    """解析目标会话标识 → (user_id, is_group, group_id)
+
+    格式: adapter:type:id
+    - qq:dm:123456 → 私聊 user 123456
+    - qq:gm:789012 → 群聊 group 789012
+    """
+    parts = target.split(":", 2)
+    if len(parts) != 3:
+        raise JMDownError(f"目标会话格式错误: {target}, 应为 adapter:type:id")
+    _adapter, stype, sid = parts
+    if stype == "dm":
+        return sid, False, None
+    if stype == "gm":
+        return sid, True, sid
+    raise JMDownError(f"未知会话类型: {stype}, 应为 dm(私聊) 或 gm(群聊)")
+
+
 # ── 下载 & PDF ──
 
 def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tuple:
@@ -182,30 +200,33 @@ class JMdownPlugin(BasePlugin):
 
     @tool(
         "send_jm_album",
-        "下载禁漫天堂(JMComic)本子并发送 PDF 到当前会话。返回标题、页数、发送结果。",
+        "下载禁漫天堂(JMComic)本子并发送 PDF 到指定会话。返回标题、页数、发送结果。",
         {
             "type": "object",
             "properties": {
                 "album_id": {
                     "type": "integer",
                     "description": "禁漫本子数字 ID"
+                },
+                "target": {
+                    "type": "string",
+                    "description": (
+                        "目标会话标识，格式为 adapter_name:session_type:session_id。"
+                        "示例：qq:dm:123456（私聊）、qq:gm:789012（群聊）"
+                    )
                 }
             },
-            "required": ["album_id"]
+            "required": ["album_id", "target"]
         }
     )
-    async def send_jm_album(self, event, album_id: int) -> str:
+    async def send_jm_album(self, event, album_id: int, target: str) -> str:
         if album_id <= 0:
             return "错误: album_id 须为正整数"
 
-        # 从 event 提取目标用户/群信息
-        sid = event.sid
-        user_id = event.messages[-1].sender.user_id
-        is_group = event.is_group_message()
-        group_id = event.messages[-1].group.group_id if is_group else None
+        user_id, is_group, group_id = _parse_target(target)
 
         try:
-            return await self._download(album_id, sid, user_id, is_group, group_id)
+            return await self._download(album_id, target, user_id, is_group, group_id)
         except JMDownError as e:
             logger.error(f"#{album_id} 失败: {e}")
             return f"❌ 失败: {e}"
