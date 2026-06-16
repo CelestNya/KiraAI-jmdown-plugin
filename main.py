@@ -333,6 +333,7 @@ class JMdownPlugin(BasePlugin):
             max(4096, int(self.plugin_cfg.get("chunk_size", 512 * 1024))),
         )
         self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
+        self._content_query = bool(self.plugin_cfg.get("content_query", True))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
 
@@ -462,6 +463,8 @@ class JMdownPlugin(BasePlugin):
         }
     )
     async def query_jm_album(self, _event, album_id: int) -> str:
+        if not self._content_query:
+            return "因内容审核要求，本子信息查询功能已关闭"
         if album_id <= 0:
             return "错误: album_id 须为正整数"
         try:
@@ -495,6 +498,8 @@ class JMdownPlugin(BasePlugin):
     async def search_jm_album(self, _event, keyword: str = "", tag: str = "",
                                author: str = "", work: str = "",
                                page: int = 1, order_by: str = "relevance") -> str:
+        if not self._content_query:
+            return "因内容审核要求，搜索功能已关闭"
         if not any([keyword, tag, author, work]):
             return "错误: 至少指定 keyword、tag、author、work 之一"
         page = max(1, page)

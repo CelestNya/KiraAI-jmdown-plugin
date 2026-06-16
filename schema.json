@@ -28,5 +28,10 @@
         "type": "switch",
         "default": true,
         "hint": "任务完成后是否在目标会话触发 LLM 自动回复"
+    },
+    "content_query": {
+        "type": "switch",
+        "default": true,
+        "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 将不可用"
     }
 }
