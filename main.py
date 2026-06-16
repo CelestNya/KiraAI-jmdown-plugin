@@ -105,10 +105,48 @@ def _fetch_album_meta(album_id: int) -> dict:
     }
 
 
+# ── 搜索 ──
+
+_ORDER_MAP = {"relevance": "mr", "views": "mv", "likes": "mp"}
+
+
+def _search_albums(*, keyword: str = "", tag: str = "", author: str = "",
+                   work: str = "", page: int = 1, order_by: str = "relevance") -> tuple:
+    """搜索本子，返回 (total, page_count, results[])。
+
+    results: [(album_id, title, tags), ...]
+    """
+    # 字段名映射：relevance/views/likes → mr/mv/mp
+    order_by = _ORDER_MAP.get(order_by, "mr")
+    try:
+        client = jmcomic.JmOption.default().build_jm_client()
+        if tag:
+            page_obj = client.search_tag(tag, page=page, order_by=order_by)
+        elif author:
+            page_obj = client.search_author(author, page=page, order_by=order_by)
+        elif work:
+            page_obj = client.search_work(work, page=page, order_by=order_by)
+        else:
+            page_obj = client.search(keyword, page=page, main_tag=0,
+                                     order_by=order_by, time="a", category="0",
+                                     sub_category=None)
+    except Exception as e:
+        raise JMDownError(f"搜索失败: {e}") from e
+
+    total = getattr(page_obj, "total", 0)
+    page_count = getattr(page_obj, "page_count", 0)
+    results = list(page_obj.iter_id_title_tag())
+    return total, page_count, results
+
+
 # ── 下载 & PDF ──
 
-def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tuple:
-    """下载图片, 返回 (album_obj, image_dir, images[], title, desc)."""
+def _download_images(album_id: int, download_dir: Path, threads: int = 45,
+                     *, progress_cb=None) -> tuple:
+    """下载图片, 返回 (album_obj, image_dir, images[], title, desc).
+
+    progress_cb: callable(pct: int) 每下载一张回调一次.
+    """
     opt = jmcomic.JmOption.default()
     opt.dir_rule.base_dir = str(download_dir.resolve())
     # Bd_Aid: 按 album_id 建目录，不依赖标题
@@ -122,12 +160,26 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
 
     try:
         # 先 clent 直查 album, 在当前线程捕获 MissingAlbumPhotoException
-        # (download_album 在多线程内部抛的异常传不出来)
-        opt.build_jm_client().get_album_detail(album_id)
+        # 同时拿到 album 来算总页数
+        client = opt.build_jm_client()
+        album_detail = client.get_album_detail(album_id)
     except jmcomic.jm_exception.MissingAlbumPhotoException:
         raise JMDownError("该号码对应的本子不存在")
     except Exception as e:
         raise JMDownError(f"获取本子信息失败: {e}") from e
+
+    # 注册下载进度回调（jmcomic 每下一张图触发 after_photo）
+    total_pages = len(next(iter(album_detail))) if album_detail else 0
+    _dl_state = [0, time.time()]  # [counter, start_time]
+    if progress_cb and total_pages > 0:
+        def _on_photo(*_):
+            _dl_state[0] += 1
+            pct = min(int(_dl_state[0] / total_pages * 100), 100)
+            elapsed = time.time() - _dl_state[1]
+            # 假定每张图平均 ~1.5MB 估算速度
+            avg_speed = (_dl_state[0] * 1.5 * 1024 * 1024) / elapsed if elapsed > 0 else 0
+            progress_cb(pct, _fmt(avg_speed) + "/s")
+        opt.plugins.after_photo = [_on_photo]
 
     # 确认存在后再进下载(会开线程池, 异常出不来的)
     try:
@@ -203,6 +255,14 @@ def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85,
     finally:
         for t in temps:
             t.unlink(missing_ok=True)
+
+
+def _fmt(b: int) -> str:
+    if b < 1024:
+        return f"{b} B"
+    if b < 1024 ** 2:
+        return f"{b / 1024:.1f} KB"
+    return f"{b / 1024 ** 2:.1f} MB"
 
 
 def _linked_episodes(album) -> list[dict]:
@@ -405,6 +465,57 @@ class JMdownPlugin(BasePlugin):
             return f"错误: {e}"
         return self._format_album_info(info)
 
+    # ── 工具: 搜索本子 ──
+
+    @tool(
+        "search_jm_album",
+        "搜索禁漫本子，返回标题、ID、标签。keyword/tag/author/work 四者至少填一个。不传 page 默认第1页。",
+        {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "（必填其一）搜索关键词，多个词用空格分隔实现复合搜索（如'后宫 中文'）"},
+                "tag": {"type": "string", "description": "（必填其一）按标签搜索（如 后宫、单行本）"},
+                "author": {"type": "string", "description": "（必填其一）按作者搜索"},
+                "work": {"type": "string", "description": "（必填其一）按作品名搜索"},
+                "page": {"type": "integer", "description": "页码，不传默认第1页"},
+                "order_by": {
+                    "type": "string",
+                    "enum": ["relevance", "views", "likes"],
+                    "description": "排序，不传默认relevance: relevance=最相关, views=最多观看, likes=最多喜欢"
+                }
+            },
+            "required": []
+        }
+    )
+    async def search_jm_album(self, _event, keyword: str = "", tag: str = "",
+                               author: str = "", work: str = "",
+                               page: int = 1, order_by: str = "relevance") -> str:
+        if not any([keyword, tag, author, work]):
+            return "错误: 至少指定 keyword、tag、author、work 之一"
+        page = max(1, page)
+        try:
+            total, page_count, results = _search_albums(
+                keyword=keyword, tag=tag, author=author, work=work,
+                page=page, order_by=order_by,
+            )
+        except JMDownError as e:
+            return f"错误: {e}"
+
+        if not results:
+            return f"未找到匹配结果（共 {total} 条）"
+
+        limit = 20
+        lines = [f"搜索完成，共 {total} 条结果（第 {page}/{page_count} 页）:"]
+        for aid, title, tags in results[:limit]:
+            tag_str = f"  [{', '.join(tags[:5])}]" if tags else ""
+            lines.append(f"#{aid} {title[:60]}{tag_str}")
+        if len(results) > limit:
+            lines.append(f"...还有 {len(results) - limit} 条未显示")
+        # 只在第一页加提示
+        if page == 1:
+            lines.append("---\n注: 可用 query_jm_album 查看详情, send_jm_album 下载, 翻页请指定 page 参数")
+        return "\n".join(lines)
+
     def _format_album_info(self, info: dict) -> str:
         ml = self._desc_max_length
         desc = info.get("description", "")
@@ -444,7 +555,7 @@ class JMdownPlugin(BasePlugin):
         if desc:
             lines.append(f"---\n{desc}")
         lines.append(
-            "---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及"
+            '---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
         )
         return "\n".join(lines)
 
@@ -523,8 +634,11 @@ class JMdownPlugin(BasePlugin):
 
             threads = int(self.plugin_cfg.get("download_threads", 45))
             # jmcomic 同步阻塞 + 自建线程池, 丢到线程避免冻结事件循环 (ctrl+c 才能打断)
+            def _dl_progress(pct: int, spd: str):
+                state.phases["下载"] = f"{pct}% ({spd})"
             album_obj, image_dir, images, title, description = await asyncio.to_thread(
                 _download_images, aid, self._download_dir, threads,
+                progress_cb=_dl_progress,
             )
             state.phases["下载"] = "已完成"
 
@@ -623,7 +737,7 @@ class JMdownPlugin(BasePlugin):
                 f"{extra}"
                 f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
                 f"---\n"
-                f"注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及"
+                '注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
             )
         # failed
         return (
@@ -655,8 +769,4 @@ class JMdownPlugin(BasePlugin):
 
     @staticmethod
     def _fmt(b: int) -> str:
-        if b < 1024:
-            return f"{b} B"
-        if b < 1024**2:
-            return f"{b/1024:.1f} KB"
-        return f"{b/1024**2:.1f} MB"
+        return _fmt(b)
