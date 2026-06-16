@@ -16,6 +16,8 @@ from PIL import Image
 import img2pdf
 
 from core.plugin import BasePlugin, PluginContext, register_tool as tool, logger
+from core.chat.message_elements import Text
+from core.chat.message_utils import MessageChain
 
 from .cache import CacheEntry, CacheIndex
 
@@ -94,7 +96,7 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
 
 
 def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85) -> int:
-    """图片合 PDF, 返回字节数. 非 JPEG 先转."""
+    """图片合 PDF, 返回字节数. 非 JPEG 先转 JPEG."""
     final: list[Path] = []
     temps: list[Path] = []
     try:
@@ -102,7 +104,7 @@ def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85) -> 
             if p.suffix.lower() in (".jpg", ".jpeg"):
                 final.append(p)
             else:
-                tmp = p.with_suffix(p.stem + ".jm_tmp.jpg")
+                tmp = p.with_name(p.stem + ".jm_tmp.jpg")
                 Image.open(p).convert("RGB").save(tmp, "JPEG", quality=quality, optimize=True)
                 final.append(tmp)
                 temps.append(tmp)
@@ -141,6 +143,8 @@ class JMdownPlugin(BasePlugin):
         self._max_cache: int = 10
         self._pdf_quality: int = 85
         self._desc_max_length: int = 80
+        self._stream_threshold: int = 10 * 1024 * 1024   # 10MB
+        self._upload_timeout: int = 300
 
     async def initialize(self):
         self._data_dir = self.ctx.get_plugin_data_dir() or Path("data/plugin_data/jmdown")
@@ -152,17 +156,33 @@ class JMdownPlugin(BasePlugin):
 
         self._max_cache = int(self.plugin_cfg.get("max_cache", 10))
         self._desc_max_length = int(self.plugin_cfg.get("desc_max_length", 80))
+        self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
+        mb = int(self.plugin_cfg.get("stream_threshold_mb", 10))
+        self._stream_threshold = mb * 1024 * 1024
+        self._upload_timeout = int(self.plugin_cfg.get("upload_timeout", 300))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
 
-        logger.info(f"JMdown 就绪, 缓存上限 {self._max_cache} 本")
+        logger.info(
+            f"JMdown 就绪, 缓存上限 {self._max_cache} 本, "
+            f"流传输阈值 {mb}MB"
+        )
 
     async def terminate(self):
         logger.info("JMdown 已终止")
 
+    async def _notice(self, sid: str, text: str):
+        """通过会话发送进度通知，LLM 后续能看见。"""
+        if not sid:
+            return
+        try:
+            await self.ctx.publish_notice(sid, MessageChain([Text(text)]), is_mentioned=False)
+        except Exception:
+            pass  # 通知失败不中断主流程
+
     @tool(
-        "download_jm_album",
-        "下载禁漫天堂(JMComic)本子，返回标题、描述、页数、本子PDF文件路径（需要时使用<file type=\"file\">标签发送）。",
+        "send_jm_album",
+        "下载禁漫天堂(JMComic)本子并发送 PDF 到当前会话。返回标题、页数、发送结果。",
         {
             "type": "object",
             "properties": {
@@ -174,12 +194,18 @@ class JMdownPlugin(BasePlugin):
             "required": ["album_id"]
         }
     )
-    async def download_jm_album(self, event, album_id: int) -> str:
+    async def send_jm_album(self, event, album_id: int) -> str:
         if album_id <= 0:
             return "错误: album_id 须为正整数"
 
+        # 从 event 提取目标用户/群信息
+        sid = event.sid
+        user_id = event.messages[-1].sender.user_id
+        is_group = event.is_group_message()
+        group_id = event.messages[-1].group.group_id if is_group else None
+
         try:
-            return await self._download(album_id)
+            return await self._download(album_id, sid, user_id, is_group, group_id)
         except JMDownError as e:
             logger.error(f"#{album_id} 失败: {e}")
             return f"❌ 失败: {e}"
@@ -187,27 +213,42 @@ class JMdownPlugin(BasePlugin):
             logger.error(f"#{album_id} 未知: {e}")
             return f"❌ 未知错误: {e}"
 
-    async def _download(self, album_id: int) -> str:
-        # 缓存命中
+    async def _download(
+        self, album_id: int,
+        sid: str = "", user_id: str = "",
+        is_group: bool = False, group_id: Optional[str] = None,
+    ) -> str:
+        ml = self._desc_max_length
+
+        # ── 缓存命中 ──
         cached = self._cache.get(album_id)
         if cached and Path(cached.pdf_path).exists():
-            logger.info(f"缓存命中: #{album_id}")
-            ml = self._desc_max_length
-            desc = cached.description[:ml] + "..." if len(cached.description) > ml else cached.description
+            await self._notice(sid, f"📤 缓存命中 ({self._fmt(Path(cached.pdf_path).stat().st_size)})，发送中...")
+            from .napcat_stream import send_file_via_stream
+            send_result = await send_file_via_stream(
+                self.ctx, sid, user_id, cached.pdf_path,
+                is_group, group_id, self._upload_timeout,
+            )
+            cached_size = Path(cached.pdf_path).stat().st_size
             return (
                 f"✅ 缓存命中\n"
                 f"📖 {cached.title}\n"
-                f"📝 {desc or '无描述'}\n"
+                f"📝 {(cached.description[:ml] + '...') if len(cached.description) > ml else (cached.description or '无描述')}\n"
                 f"📄 {cached.page_count} 页\n"
-                f"📎 {cached.pdf_path}"
+                f"💾 {self._fmt(cached_size)}\n"
+                f"{send_result}"
             )
 
+        # ── 下载 → PDF → 发送 ──
+        await self._notice(sid, f"⏬ 开始下载 #{album_id} ...")
         logger.info(f"下载 #{album_id} ...")
 
         threads = int(self.plugin_cfg.get("download_threads", 45))
         _, image_dir, images, title, description = _download_images(
             album_id, self._download_dir, threads
         )
+
+        await self._notice(sid, f"✅ 已下载 {len(images)} 张图片，合成 PDF 中...")
 
         pdf_path = self._cache_dir / f"{album_id}.pdf"
         size = _images_to_pdf(images, pdf_path, self._pdf_quality)
@@ -222,15 +263,20 @@ class JMdownPlugin(BasePlugin):
         evicted = self._cache.put(entry)
         self._evict_cleanup(evicted)
 
-        ml = self._desc_max_length
+        await self._notice(sid, f"📤 PDF ({self._fmt(size)}) 发送中...")
+        from .napcat_stream import send_file_via_stream
+        send_result = await send_file_via_stream(
+            self.ctx, sid, user_id, str(pdf_path.resolve()),
+            is_group, group_id, self._upload_timeout,
+        )
+
         desc = description[:ml] + "..." if len(description) > ml else description
-        logger.info(f"#{album_id} → {pdf_path.name} ({page_count} 页)")
         lines = [
-            f"✅ 下载 & 合成完成",
-            f"📖 {title}",
+            f"✅ {title}",
             f"📝 {desc or '无描述'}",
             f"📄 {page_count} 页",
-            f"📎 {pdf_path.resolve()}",
+            f"💾 {self._fmt(size)}",
+            send_result,
         ]
         if evicted:
             lines.append(f"🗑️ 淘汰 {len(evicted)} 本旧缓存")
