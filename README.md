@@ -124,7 +124,7 @@ LLM → 告知用户任务已提交
 | `pdf_quality` | integer | 85 | JPEG 质量 (1-100) |
 | `upload_timeout` | integer | 300 | 上传超时秒数 |
 | `notify_llm` | switch | true | 完成后是否触发 LLM 回复 |
-| `content_query` | switch | true | 允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 不可用 |
+| `content_query` | switch | true | 允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 不可用，避免 LLM 内容审查 |
 
 ## 缓存位置
 

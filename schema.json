@@ -32,6 +32,6 @@
     "content_query": {
         "type": "switch",
         "default": true,
-        "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 将不可用"
+        "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 将不可用，避免 LLM 内容审查"
     }
 }
