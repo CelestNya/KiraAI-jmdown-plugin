@@ -53,7 +53,8 @@ async def stream_upload_file(
     logger.info(f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})")
 
     # expected_sha256 必须为完整文件 hash, 所有分片传同一个值
-    full_sha256 = hashlib.sha256(open(file_path, "rb").read()).hexdigest()
+    # 分块读 + 丢线程, 避免一次性读入大文件并阻塞事件循环
+    full_sha256 = await asyncio.to_thread(_sha256_file, file_path)
     remote_path: Optional[str] = None
     t0 = time.time()
     report_every = max(1, total_chunks // 20)  # 约 20 次通知
@@ -166,6 +167,15 @@ async def send_file_via_stream(
 
     logger.info(f"File sent to {user_id}: {file_name}")
     return f"📤 已通过流传输发送 ({_fmt(file_size)})"
+
+
+def _sha256_file(file_path: str) -> str:
+    """分块读取计算 SHA256, 避免一次性读入大文件."""
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _fmt(b: int) -> str:
