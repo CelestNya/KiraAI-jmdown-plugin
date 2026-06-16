@@ -20,6 +20,8 @@ Thumbs.db
 
 # Test artifacts
 _test_tmp/
+test_output/
+test_dl/
 
 # Environment
 .env

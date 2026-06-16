@@ -2,25 +2,32 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue)](manifest.json)
 
-**jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子并合成为 PDF，自带 FIFO 缓存管理。
+**jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 分片流传输发送到 QQ。
 
 ## 工作流程
 
 ```
-用户请求本子 ID → 下载图片 → 合成为 PDF → 删除原图 → 存入缓存 → 返回路径给 LLM
+用户请求本子 ID → 后台异步任务 → 下载图片 → 合成 PDF → NapCat Stream 分片上传 → 发送到目标会话 → 完成通知（可选触发 LLM 回复）
 ```
 
-- LLM 通过 `<file type="file">` 标签将 PDF 发送给用户
-- 缓存满时自动淘汰最旧条目（FIFO）
-- 插件启动时清理孤儿文件
+| 阶段 | 说明 |
+|------|------|
+| 提交任务 | LLM 调用 `send_jm_album` 工具，返回 `JOB-YYMMDD-NNN` 标识码 |
+| 下载 | jmcomic 库并行下载图片，按 album_id 建目录 |
+| 合成 | img2pdf + Pillow 合成为 PDF，实时报进度 |
+| 上传 | NapCat Stream API 分片上传（512KB/片），绕过 WS 帧限制 |
+| 发送 | `upload_private_file` / `upload_group_file` 发送给目标 |
+| 通知 | 完成/失败时发通知到目标会话，可选触发 LLM 自动回复 |
 
 ## 安装
 
 ### 前提条件
 
 - Python ≥ 3.11
-- KiraAI（插件系统）
+- KiraAI（含 NapCatQQ + WebSocket 连接）
+- QQ 机器人框架（NapCat）
 
 ### 步骤
 
@@ -31,101 +38,93 @@ cd /path/to/KiraAI/data/plugins
 git clone https://github.com/CelestNya/KiraAI-jmdown-plugin.git jmdown
 ```
 
-2. 确保 `requirements.txt` 中的依赖已安装（KiraAI 会自动安装）：
-
-```
-jmcomic>=2.7
-Pillow>=11
-img2pdf>=0.6
-```
-
-也可手动安装：
+2. 安装依赖（KiraAI 自动安装，也可手动）：
 
 ```bash
 pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6
 ```
 
-3. 重启 KiraAI，插件自动发现加载。
+3. 重启 KiraAI，插件自动加载。
 
 ## 使用
 
-### 工具：`download_jm_album`
+### 工具：`send_jm_album`
 
-LLM 调用此工具下载指定 ID 的本子：
+提交下载任务到后台，返回任务标识码。
 
 ```
-参数: album_id (integer) — 禁漫本子数字 ID
-返回: 标题、描述、页数、PDF 文件路径
+参数:
+  album_id (integer) — 禁漫本子数字 ID
+  target   (string)  — 目标会话，格式 "adapter:type:id"
+                       示例: qq:dm:123456（私聊）、qq:gm:789012（群聊）
+返回: 任务标识码 JOB-YYMMDD-NNN
 ```
 
-**示例：**
+### 工具：`query_jm_task`
 
-> 用户：帮我下载本子 421982
->
-> LLM → 调用 `download_jm_album(album_id=421982)`
->
-> LLM → 返回结果：
-> ```
-> ✅ 下载 & 合成完成
-> 📖 [Miyako] MY ROOMMATE 2 (EP.6-9)
-> 📝 无描述
-> 📄 15 页
-> 📎 /path/to/cache/421982.pdf
-> ```
->
-> LLM → 通过文件标签发送 PDF 给用户
+查询后台任务进度。
+
+```
+参数:
+  job_id (string) — 任务标识码
+返回: 阶段状态、耗时、结果/错误
+```
+
+### 示例
+
+```
+用户：帮我下载本子 421982，发到我QQ私聊
+LLM → send_jm_album(album_id=421982, target="qq:dm:2263130787")
+     → "已提交任务 JOB-241215-001"
+LLM → 告知用户任务已提交
+...异步完成后自动发通知到会话...
+```
+
+### 缓存
+
+- FIFO 淘汰，默认缓存 10 本
+- 缓存命中跳过下载 + 合成，直接上传发送
+- `query_jm_task` 可查历史任务记录（最多保留 30 条）
 
 ## 配置
 
-在 KiraAI 插件管理界面配置以下参数：
+在 KiraAI 插件管理界面配置（`schema.json`）：
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_cache` | integer | 10 | 最多缓存几本 PDF，超限自动删最旧 |
+| `max_cache` | integer | 10 | 最多缓存几本 PDF |
 | `desc_max_length` | integer | 80 | 描述截取字符数 |
-| `download_threads` | integer | 45 | 下载图片的并行线程数 |
+| `download_threads` | integer | 45 | 下载图片并行线程 |
+| `pdf_quality` | integer | 85 | JPEG 质量 (1-100) |
+| `upload_timeout` | integer | 300 | 上传超时秒数 |
+| `notify_llm` | switch | true | 完成后是否触发 LLM 回复 |
 
-### 配置文件示例（`schema.json`）
+## 缓存位置
 
-```json
-{
-  "max_cache": {
-    "type": "integer",
-    "default": 10,
-    "hint": "最多缓存几本 PDF，超限自动删最旧"
-  },
-  "desc_max_length": {
-    "type": "integer",
-    "default": 80,
-    "hint": "描述截取字符数"
-  },
-  "download_threads": {
-    "type": "integer",
-    "default": 45,
-    "hint": "下载图片的并行线程数"
-  }
-}
-```
-
-## 缓存机制
-
-- **存储位置**：`data/plugin_data/jmdown/cache/`（插件数据目录）
+- **PDF 缓存**：`data/plugin_data/jmdown/cache/`
 - **索引文件**：`data/plugin_data/jmdown/cache_index.json`
-- **淘汰策略**：FIFO — 当缓存数量超过 `max_cache` 时，删除最早下载的条目
-- **孤儿清理**：启动时自动清除索引中不存在的 PDF 和下载目录
+- **下载临时目录**：`data/plugin_data/jmdown/download/`
+
+## 技术要点
+
+- 大文件上传走 NapCat Stream API（分片 + `is_complete` 组装），非旧版 base64 直传
+- 目录规则使用 `Bd_Aid`（按 album_id 命名），不依赖标题
+- 页数校验：`sum(len(ch) for ch in album_obj)` vs 实际图片数，不匹配则报错
+- Background task 绕过 KiraAI tool 60s 超时限制
 
 ## 项目结构
 
 ```
-KiraAI-jmdown-plugin/
-├── __init__.py         # 插件入口
-├── main.py             # 核心实现（下载、PDF、缓存）
-├── cache.py            # 缓存模块（FIFO 队列）
-├── manifest.json       # 插件元信息
-├── schema.json         # 配置参数定义
-├── requirements.txt    # 依赖声明
-├── .gitignore
-├── LICENSE             # MIT 许可
+├── __init__.py          # 插件入口
+├── main.py              # 核心实现（工具、任务管理、下载、PDF、通知）
+├── cache.py             # FIFO 缓存模块
+├── napcat_stream.py     # NapCat Stream API 分片上传封装
+├── manifest.json        # 插件元信息
+├── schema.json          # 配置参数定义
+├── requirements.txt     # 依赖声明
+├── test_send.py         # WS 直连上传测试脚本
+├── docs/                # VitePress 开发者文档
+├── LICENSE
 └── README.md
 ```
 
