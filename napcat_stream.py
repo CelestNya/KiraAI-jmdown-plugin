@@ -32,12 +32,18 @@ def _find_qq_adapter(adapter_mgr):
     return None
 
 
-async def stream_upload_file(client, file_path: str, timeout: int = 300) -> str:
+async def stream_upload_file(
+    client,
+    file_path: str,
+    timeout: int = 300,
+    progress_cb=None,
+) -> str:
     """upload_file_stream: 分片上传 → 返回 NapCat 远端 temp 路径.
 
     client: NapCatWebSocketClient 实例（已有 WS 连接）
     file_path: 本地 PDF 绝对路径
     timeout: 单次 send_action 超时
+    progress_cb: async callable(pct: int) 每 25% 回调一次
     """
     file_size = os.path.getsize(file_path)
     total_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE
@@ -45,6 +51,7 @@ async def stream_upload_file(client, file_path: str, timeout: int = 300) -> str:
 
     sha256 = hashlib.sha256()
     remote_path: Optional[str] = None
+    last_reported_pct = -1
 
     with open(file_path, "rb") as f:
         for i in range(total_chunks):
@@ -69,6 +76,14 @@ async def stream_upload_file(client, file_path: str, timeout: int = 300) -> str:
                     f"status={status} data={resp.get('data', {})}"
                 )
 
+            # 每 25% 回调一次
+            if progress_cb:
+                pct = int((i + 1) / total_chunks * 100)
+                report = pct // 25
+                if report > last_reported_pct:
+                    last_reported_pct = report
+                    await progress_cb(min(pct, 100))
+
             # 最后一片才返回 file_path
             if i == total_chunks - 1:
                 remote_path = resp.get("data", {}).get("file_path", "")
@@ -87,10 +102,12 @@ async def send_file_via_stream(
     is_group: bool = False,
     group_id: Optional[str] = None,
     timeout: int = 300,
+    progress_cb=None,
 ) -> str:
     """完整链路: stream upload → upload_private_file / upload_group_file.
 
     返回人类可读的结果文本。
+    progress_cb: async callable(pct: int) for upload progress.
     """
     # 动态查找 platform=QQ 的 adapter，不硬编码注册名
     adapter = _find_qq_adapter(ctx.adapter_mgr)
@@ -102,7 +119,7 @@ async def send_file_via_stream(
     file_name = os.path.basename(file_path)
 
     # 1. 分片上传到 NapCat temp
-    remote_path = await stream_upload_file(client, file_path, timeout)
+    remote_path = await stream_upload_file(client, file_path, timeout, progress_cb)
     file_size = os.path.getsize(file_path)
     logger.info(f"Stream upload OK: {file_name} ({_fmt(file_size)}) → {remote_path}")
 
