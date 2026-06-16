@@ -158,7 +158,9 @@ def _rmtree(dir_path: Path):
     if not dir_path.exists():
         return
     for child in dir_path.iterdir():
-        if child.is_dir():
+        if child.is_symlink():
+            child.unlink()
+        elif child.is_dir():
             _rmtree(child)
         else:
             child.unlink(missing_ok=True)
@@ -198,8 +200,11 @@ class JMdownPlugin(BasePlugin):
         self._max_cache = int(self.plugin_cfg.get("max_cache", 10))
         self._desc_max_length = int(self.plugin_cfg.get("desc_max_length", 80))
         self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
-        self._upload_timeout = int(self.plugin_cfg.get("upload_timeout", 300))
-        self._chunk_size = int(self.plugin_cfg.get("chunk_size", 512 * 1024))
+        self._upload_timeout = max(1, int(self.plugin_cfg.get("upload_timeout", 300)))
+        self._chunk_size = min(
+            16 * 1024 * 1024,  # NapCat WS 帧上限
+            max(4096, int(self.plugin_cfg.get("chunk_size", 512 * 1024))),
+        )
         self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
@@ -277,7 +282,10 @@ class JMdownPlugin(BasePlugin):
         self._task_counter += 1
         job_id = f"JOB-{datetime.now().strftime('%y%m%d')}-{self._task_counter:03d}"
 
-        _parse_target(target)  # 提前校验 target 格式
+        try:
+            _parse_target(target)  # 提前校验 target 格式
+        except JMDownError as e:
+            return f"错误: {e}"
 
         state = TaskState(job_id=job_id, album_id=album_id, target=target)
         self._task_registry[job_id] = state

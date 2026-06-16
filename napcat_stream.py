@@ -170,7 +170,7 @@ async def send_file_via_stream(
         )
 
     logger.info(f"File sent to {user_id}: {file_name}")
-    return f"📤 已通过流传输发送 ({_fmt(file_size)})"
+    return f"已通过流传输发送 ({_fmt(file_size)})"
 
 
 def _sha256_file(file_path: str) -> str:
