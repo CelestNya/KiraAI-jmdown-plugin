@@ -129,23 +129,19 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     title = getattr(album_obj, "name", str(album_id))
     description = getattr(album_obj, "description", "")
 
-    # 目录由 Bd_Aid 规则决定: {download_dir}/{album_id}/
-    image_dir = download_dir / str(album_id)
-    if not image_dir.is_dir():
-        raise JMDownError(f"下载目录不存在: {image_dir}")
-
+    # 多章节本子可能分多个子目录 (如 1164504/ + 1205945/), 递归扫全部
     valid = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
     images = sorted(
-        p for p in image_dir.rglob("*")
+        p for p in download_dir.rglob("*")
         if p.is_file() and p.suffix.lower() in valid
     )
     expected = sum(len(ch) for ch in album_obj)
     if expected > 0 and len(images) != expected:
         raise JMDownError(f"页数不匹配: 实际 {len(images)} 张, 预期 {expected} 张")
     if not images:
-        raise JMDownError(f"下载完成但目录中无图片文件: {image_dir}")
+        raise JMDownError(f"下载完成但目录中无图片文件: {download_dir}")
 
-    return album_obj, image_dir, images, title, description
+    return album_obj, download_dir, images, title, description
 
 
 def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85,
