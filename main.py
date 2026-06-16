@@ -81,6 +81,8 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
 
     try:
         result_set = opt.download_album([album_id])
+    except jmcomic.jm_exception.MissingAlbumPhotoException as e:
+        raise JMDownError(f"该号码对应的本子不存在") from e
     except Exception as e:
         raise JMDownError(f"下载失败: {e}") from e
     if not result_set:
