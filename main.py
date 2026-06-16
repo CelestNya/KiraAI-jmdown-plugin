@@ -87,6 +87,9 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     title = getattr(album_obj, "name", str(album_id))
     description = getattr(album_obj, "description", "")
 
+    # 计算总页数（album.page_count 可能为 0，需累加各章）
+    total_pages = sum(len(chapter) for chapter in album_obj)
+
     # 找到实际下载目录（默认 Bd_Pname 规则，目录名 = 本子标题）
     valid = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
     image_dir: Optional[Path] = None
@@ -94,12 +97,12 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
         if not d.is_dir():
             continue
         imgs = [p for p in d.rglob("*") if p.is_file() and p.suffix.lower() in valid]
-        if len(imgs) == album_obj.page_count:
+        if len(imgs) == total_pages:
             image_dir = d
             images = sorted(imgs)
             break
     if image_dir is None:
-        raise JMDownError(f"下载完成但未找到含 {album_obj.page_count} 张图片的目录, 请检查配置")
+        raise JMDownError(f"下载完成但未找到含 {total_pages} 张图片的目录")
 
     return album_obj, image_dir, images, title, description
 
