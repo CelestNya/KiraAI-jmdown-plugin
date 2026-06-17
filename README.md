@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.6.0-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.7.1-blue)](manifest.json)
 
 **jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 分片流传输发送到 QQ。
 
@@ -125,6 +125,9 @@ LLM → 告知用户任务已提交
 | `upload_timeout` | integer | 300 | 上传超时秒数 |
 | `notify_llm` | switch | true | 完成后是否触发 LLM 回复 |
 | `content_query` | switch | false | 允许搜索和查看本子元信息。默认关闭避免 LLM 内容审查 |
+| `zip_encrypt` | switch | false | 压缩并加密为 ZIP（AES-256），绕过 QQ 内容审查 |
+| `random_password` | switch | true | true=随机强密码, false=自定义密码 |
+| `custom_password` | string | "" | `random_password=false` 时生效 |
 
 ## 缓存位置
 
@@ -141,6 +144,8 @@ LLM → 告知用户任务已提交
 - 下载/合成/上传三阶段均实时显示百分比和速度
 - 后台任务（Background task）绕过 KiraAI tool 60s 超时限制
 - `content_query` 开关关闭时，搜索、元信息查询、完成通知中的元数据全部隐藏，仅保留下载发送功能
+- 上传用 `asyncio.wait_for` 做外层硬超时，避免 WS 半开连接卡死任务
+- 死任务检测：超过 `upload_timeout+120s` 未完成的任务自动取消，允许重新提交
 
 ## 项目结构
 
