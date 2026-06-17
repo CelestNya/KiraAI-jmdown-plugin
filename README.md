@@ -128,6 +128,7 @@ LLM → 告知用户任务已提交
 | `zip_encrypt` | switch | false | 压缩并加密为 ZIP（AES-256），绕过 QQ 内容审查 |
 | `random_password` | switch | true | true=随机强密码, false=自定义密码 |
 | `custom_password` | string | "" | `random_password=false` 时生效 |
+| `max_concurrent` | integer | 2 | 同时最多下载任务数 |
 
 ## 缓存位置
 
