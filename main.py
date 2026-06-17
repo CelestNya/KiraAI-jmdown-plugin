@@ -379,6 +379,7 @@ class JMdownPlugin(BasePlugin):
         self._zip_encrypt = bool(self.plugin_cfg.get("zip_encrypt", False))
         self._random_password = bool(self.plugin_cfg.get("random_password", True))
         self._custom_password = str(self.plugin_cfg.get("custom_password", ""))
+        self._max_concurrent = max(1, int(self.plugin_cfg.get("max_concurrent", 2)))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
 
@@ -444,7 +445,7 @@ class JMdownPlugin(BasePlugin):
 
     @tool(
         "send_jm_album",
-        "提交 JMComic 本子下载任务到后台，返回任务标识码。用 query_jm_task 查进度。",
+        "提交 JMComic 本子下载任务到后台，返回任务标识码。用 query_jm_task 查进度。下载有并发上限，拒绝用户的大批量下载的请求",
         {
             "type": "object",
             "properties": {
@@ -466,6 +467,13 @@ class JMdownPlugin(BasePlugin):
     async def send_jm_album(self, _event, album_id: int, target: str) -> str:
         if album_id <= 0:
             return "错误: album_id 须为正整数"
+
+        # 全局并发限制
+        if len(self._running_tasks) >= self._max_concurrent:
+            return (
+                f"当前下载任务过多（{len(self._running_tasks)}/{self._max_concurrent}），"
+                "请等待现有任务完成后再试"
+            )
 
         # 去重: 同一 album_id 正在运行则复用
         # 超过 upload_timeout+120s 视为死任务，允许覆盖
