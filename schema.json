@@ -14,6 +14,11 @@
         "default": 45,
         "hint": "下载图片的并行线程数"
     },
+    "max_concurrent": {
+        "type": "integer",
+        "default": 2,
+        "hint": "同时最多下载任务数，防止大规模批量下载占用资源"
+    },
     "chunk_size": {
         "type": "integer",
         "default": 524288,
@@ -48,10 +53,5 @@
         "type": "string",
         "default": "",
         "hint": "自定义加密密码（需关闭 random_password 才生效）"
-    },
-    "max_concurrent": {
-        "type": "integer",
-        "default": 2,
-        "hint": "同时最多下载任务数，防止大规模批量下载占用资源"
     }
 }
