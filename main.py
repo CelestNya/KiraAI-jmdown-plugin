@@ -607,6 +607,9 @@ class JMdownPlugin(BasePlugin):
             ])
         if s.status == "failed" and s.error:
             lines.append(f"错误: {s.error}")
+        lines.append(
+            '---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
+        )
         return "\n".join(lines)
 
     # ── 后台任务 ──
