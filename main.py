@@ -257,8 +257,8 @@ def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85,
 # ── jmcomic 下载进度插件（类注册制） ──
 
 class _JMDownPctPlugin(jmcomic.jm_plugin.JmOptionPlugin):
-    """每下一张图回调 after_photo, 更新下载进度。"""
-    def after_photo(self, photo, downloader):
+    """每下一张图回调 invoke, 更新下载进度。"""
+    def invoke(self, **kwargs):
         info = self.kwargs.get("info")
         if not info:
             return
