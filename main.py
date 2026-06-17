@@ -149,8 +149,7 @@ def _search_albums(*, keyword: str = "", tag: str = "", author: str = "",
 
 # ── 下载 & PDF ──
 
-def _download_images(album_id: int, download_dir: Path, threads: int = 45,
-                     *, progress_cb=None) -> tuple:
+def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tuple:
     """下载图片, 返回 (album_obj, image_dir, images[], title, desc).
 
     progress_cb: callable(pct: int) 每下载一张回调一次.
@@ -176,26 +175,7 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45,
     except Exception as e:
         raise JMDownError(f"获取本子信息失败: {e}") from e
 
-    # 注册下载进度回调（jmcomic 每下一张图触发 after_photo）
-    # 页数从 get_photo_detail 获取（get_album_detail 的 page_count 常为 0）
-    total_pages = 0
-    try:
-        first_pid = album_detail.episode_list[0][0] if album_detail.episode_list else None
-        if first_pid:
-            photo = client.get_photo_detail(int(first_pid))
-            total_pages = len(photo) if hasattr(photo, "__len__") else 0
-    except Exception:
-        pass
-    _dl_state = [0, time.time()]  # [counter, start_time]
-    if progress_cb and total_pages > 0:
-        def _on_photo(*_):
-            _dl_state[0] += 1
-            pct = min(int(_dl_state[0] / total_pages * 100), 100)
-            elapsed = time.time() - _dl_state[1]
-            # 假定每张图平均 ~1.5MB 估算速度
-            avg_speed = (_dl_state[0] * 1.5 * 1024 * 1024) / elapsed if elapsed > 0 else 0
-            progress_cb(pct, _fmt(avg_speed) + "/s")
-        opt.plugins.after_photo = [_on_photo]
+    # jmcomic 插件系统不支持简单回调，跳过进度追踪以免崩溃
 
     # 用 download_photo 只下单章（不下挂载章节），避免覆盖
     try:
@@ -644,11 +624,8 @@ class JMdownPlugin(BasePlugin):
 
             threads = int(self.plugin_cfg.get("download_threads", 45))
             # jmcomic 同步阻塞 + 自建线程池, 丢到线程避免冻结事件循环 (ctrl+c 才能打断)
-            def _dl_progress(pct: int, spd: str):
-                state.phases["下载"] = f"{pct}% ({spd})"
             album_obj, image_dir, images, title, description = await asyncio.to_thread(
                 _download_images, aid, self._download_dir, threads,
-                progress_cb=_dl_progress,
             )
             state.phases["下载"] = "已完成"
 
