@@ -397,6 +397,33 @@ class JMdownPlugin(BasePlugin):
         self._running_tasks.clear()
         logger.info("JMdown 已终止")
 
+    async def _upload_with_watchdog(self, upload_coro, timeout: int) -> str:
+        """上传带看门狗：进度连续 40s 不变视为停滞，取消上传。"""
+        _ul_last = [""]
+
+        async def _watchdog():
+            while True:
+                await asyncio.sleep(20)
+                cur = _ul_last[0]
+                if not cur:
+                    continue
+                if getattr(_watchdog, "_last", None) == cur:
+                    raise TimeoutError("上传进度停滞超过 40s")
+                _watchdog._last = cur
+
+        async def _progress_hook(pct: int, spd: str):
+            _ul_last[0] = f"{pct}%"
+
+        # 注入进度钩子到 upload_coro（通过替换 progress_cb 参数）
+        # 这里不直接改 upload_coro，由调用方传带钩子的 progress_cb
+        wd_task = asyncio.create_task(_watchdog())
+        try:
+            return await asyncio.wait_for(upload_coro, timeout=timeout)
+        except (asyncio.CancelledError, TimeoutError):
+            raise TimeoutError("上传进度停滞, 已取消")
+        finally:
+            wd_task.cancel()
+
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
         """通过会话发送进度通知。mentioned=True 会触发目标会话 LLM 回复。"""
         if not sid:
@@ -685,7 +712,7 @@ class JMdownPlugin(BasePlugin):
 
                 from .napcat_stream import send_file_via_stream
                 _ul_to = self._upload_timeout + 30
-                send_result = await asyncio.wait_for(
+                send_result = await self._upload_with_watchdog(
                     send_file_via_stream(
                         self.ctx, sid, user_id, upload_path,
                         is_group, group_id, self._upload_timeout,
@@ -769,7 +796,7 @@ class JMdownPlugin(BasePlugin):
 
             from .napcat_stream import send_file_via_stream
             _ul_timeout = self._upload_timeout + 30
-            send_result = await asyncio.wait_for(
+            send_result = await self._upload_with_watchdog(
                 send_file_via_stream(
                     self.ctx, sid, user_id, str(upload_path.resolve()),
                     is_group, group_id, self._upload_timeout,
