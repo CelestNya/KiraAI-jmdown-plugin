@@ -1,3 +1,4 @@
 jmcomic>=2.7
 Pillow>=11
 img2pdf>=0.6
+pyzipper>=0.4

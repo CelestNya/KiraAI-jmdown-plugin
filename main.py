@@ -259,7 +259,7 @@ def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85,
 class _JMDownPctPlugin(jmcomic.jm_plugin.JmOptionPlugin):
     """每下一张图回调 invoke, 更新下载进度。"""
     def invoke(self, **kwargs):
-        info = self.kwargs.get("info")
+        info = kwargs.get("info")
         if not info:
             return
         info["n"] += 1
@@ -294,6 +294,33 @@ def _linked_episodes(album) -> list[dict]:
         if str(ep_id) != str(album_id):
             linked.append({"id": int(ep_id), "index": ep_idx, "title": ep_title or ""})
     return linked
+
+
+# ── ZIP / 加密 ──
+
+def _generate_password(random_pw: bool, custom: str = "") -> str:
+    """生成加密密码。random_pw=true → 随机16位, false → 自定义。"""
+    if random_pw:
+        import secrets
+        import string
+        chars = string.ascii_letters + string.digits + "!@#$%^&*"
+        return "".join(secrets.choice(chars) for _ in range(16))
+    return custom or "jmdown"
+
+
+def _create_zip(pdf_path: Path, zip_path: Path, password: str = "") -> int:
+    """将 PDF 打包为 ZIP, 可选 AES-256 加密. 返回 ZIP 文件字节数."""
+    import pyzipper
+    if password:
+        with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED,
+                                 encryption=pyzipper.WZ_AES) as zf:
+            zf.setpassword(password.encode("utf-8"))
+            zf.write(pdf_path, pdf_path.name)
+    else:
+        import zipfile
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.write(pdf_path, pdf_path.name)
+    return zip_path.stat().st_size
 
 
 def _rmtree(dir_path: Path):
@@ -349,6 +376,9 @@ class JMdownPlugin(BasePlugin):
         )
         self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
         self._content_query = bool(self.plugin_cfg.get("content_query", True))
+        self._zip_encrypt = bool(self.plugin_cfg.get("zip_encrypt", False))
+        self._random_password = bool(self.plugin_cfg.get("random_password", True))
+        self._custom_password = str(self.plugin_cfg.get("custom_password", ""))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
 
@@ -411,11 +441,22 @@ class JMdownPlugin(BasePlugin):
             return "错误: album_id 须为正整数"
 
         # 去重: 同一 album_id 正在运行则复用
-        if album_id in self._running_tasks and not self._running_tasks[album_id].done():
-            existing = next(
-                (s for s in self._task_registry.values()
-                 if s.album_id == album_id and s.status == "running"),
-                None,
+        # 超过 upload_timeout+120s 视为死任务，允许覆盖
+        _task = self._running_tasks.get(album_id)
+        if _task and not _task.done():
+            _elapsed = time.time() - next(
+                (s.started_at for s in self._task_registry.values()
+                 if s.album_id == album_id),
+                time.time(),
+            )
+            if _elapsed > self._upload_timeout + 120:
+                _task.cancel()
+                self._running_tasks.pop(album_id, None)
+            else:
+                existing = next(
+                    (s for s in self._task_registry.values()
+                     if s.album_id == album_id and s.status == "running"),
+                    None,
             )
             if existing:
                 return f"#{album_id} 已在下载队列中，标识码: {existing.job_id}"
@@ -605,6 +646,10 @@ class JMdownPlugin(BasePlugin):
                 f"描述: {desc or '无描述'}",
                 f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}{ep_str}",
             ])
+        if s.status == "done" and s.result:
+            pwd = s.result.get("password", "")
+            if pwd:
+                lines.append(f"密码: {pwd}")
         if s.status == "failed" and s.error:
             lines.append(f"错误: {s.error}")
         lines.append(
@@ -626,17 +671,28 @@ class JMdownPlugin(BasePlugin):
                 state.phases["下载"] = "缓存"
                 state.phases["合成"] = "缓存"
                 state.phases["上传"] = "0%"
-                await self._notice(sid, f"缓存命中 [{state.job_id}], 发送中...")
-
                 async def _cache_upload_progress(pct: int, spd: str):
                     state.phases["上传"] = f"{pct}% ({spd})"
 
+                password = ""
+                upload_path = cached.pdf_path
+                if self._zip_encrypt:
+                    password = _generate_password(self._random_password, self._custom_password)
+                    zip_path = self._cache_dir / f"{aid}.zip"
+                    await asyncio.to_thread(_create_zip, Path(cached.pdf_path), zip_path, password)
+                    upload_path = str(zip_path.resolve())
+                    state.phases["合成"] = "ZIP"
+
                 from .napcat_stream import send_file_via_stream
-                send_result = await send_file_via_stream(
-                    self.ctx, sid, user_id, cached.pdf_path,
-                    is_group, group_id, self._upload_timeout,
-                    progress_cb=_cache_upload_progress,
-                    chunk_size=self._chunk_size,
+                _ul_to = self._upload_timeout + 30
+                send_result = await asyncio.wait_for(
+                    send_file_via_stream(
+                        self.ctx, sid, user_id, upload_path,
+                        is_group, group_id, self._upload_timeout,
+                        progress_cb=_cache_upload_progress,
+                        chunk_size=self._chunk_size,
+                    ),
+                    timeout=_ul_to,
                 )
                 state.phases["上传"] = "已完成"
                 state.phases["发送"] = "已完成"
@@ -645,15 +701,16 @@ class JMdownPlugin(BasePlugin):
                     "title": cached.title,
                     "description": cached.description,
                     "page_count": cached.page_count,
-                    "file_size": Path(cached.pdf_path).stat().st_size,
+                    "file_size": Path(upload_path).stat().st_size,
                     "send_result": send_result,
                     "from_cache": True,
+                    "linked_episodes": [],
+                    "password": password,
                 }
                 await self._send_completion_notice(sid, state)
                 return
 
             # ── 2. 下载 ──
-            await self._notice(sid, f"[{state.job_id}] 下载 #{aid} ...")
             state.phases["下载"] = "进行中"
 
             def _update_download(*_):
@@ -671,7 +728,6 @@ class JMdownPlugin(BasePlugin):
             state.phases["下载"] = "已完成"
 
             # ── 3. 合成 PDF ──
-            await self._notice(sid, f"[{state.job_id}] 合成 PDF ({len(images)} 页)...")
             state.phases["合成"] = "0%"
 
             pdf_path = self._cache_dir / f"{aid}.pdf"
@@ -694,19 +750,33 @@ class JMdownPlugin(BasePlugin):
             evicted = self._cache.put(entry)
             self._evict_cleanup(evicted)
 
+            # ── 3.5 ZIP / 加密 ──
+            password = ""
+            upload_path = pdf_path
+            if self._zip_encrypt:
+                password = _generate_password(self._random_password, self._custom_password)
+                zip_path = self._cache_dir / f"{aid}.zip"
+                await asyncio.to_thread(_create_zip, pdf_path, zip_path, password)
+                size = zip_path.stat().st_size
+                upload_path = zip_path
+                state.phases["合成"] = "ZIP"
+
             # ── 4. 上传 NapCat temp ──
-            await self._notice(sid, f"[{state.job_id}] 上传中...")
             state.phases["上传"] = "0%"
 
             async def _upload_progress(pct: int, spd: str):
                 state.phases["上传"] = f"{pct}% ({spd})"
 
             from .napcat_stream import send_file_via_stream
-            send_result = await send_file_via_stream(
-                self.ctx, sid, user_id, str(pdf_path.resolve()),
-                is_group, group_id, self._upload_timeout,
-                progress_cb=_upload_progress,
-                chunk_size=self._chunk_size,
+            _ul_timeout = self._upload_timeout + 30
+            send_result = await asyncio.wait_for(
+                send_file_via_stream(
+                    self.ctx, sid, user_id, str(upload_path.resolve()),
+                    is_group, group_id, self._upload_timeout,
+                    progress_cb=_upload_progress,
+                    chunk_size=self._chunk_size,
+                ),
+                timeout=_ul_timeout,
             )
             state.phases["上传"] = "已完成"
 
@@ -724,6 +794,7 @@ class JMdownPlugin(BasePlugin):
                 "send_result": send_result,
                 "from_cache": False,
                 "linked_episodes": linked,
+                "password": password,
             }
 
             await self._send_completion_notice(sid, state)
@@ -747,6 +818,9 @@ class JMdownPlugin(BasePlugin):
     def _completion_notice(self, s: TaskState) -> str:
         p = s.phases
         if s.status == "done":
+            pwd = s.result.get("password", "") if s.result else ""
+            pwd_line = f"密码: {pwd}\n" if pwd else ""
+            pwd_hint = "若无用户要求，请务必及时告知用户密码\n" if pwd else ""
             if self._content_query:
                 r = s.result
                 ml = self._desc_max_length
@@ -765,14 +839,18 @@ class JMdownPlugin(BasePlugin):
                     f"描述: {desc or '无描述'}\n"
                     f"{extra}"
                     f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
+                    f"{pwd_line}"
                     f"---\n"
+                    f"{pwd_hint}"
                     '注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
                 )
             return (
                 f"任务 [{s.job_id}] #{s.album_id} 全部完成\n"
                 f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}\n"
+                f"{pwd_line}"
                 f"耗时: {s.elapsed:.0f}s\n"
                 f"---\n"
+                f"{pwd_hint}"
                 '注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
             )
         # failed
