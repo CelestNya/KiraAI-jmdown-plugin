@@ -149,7 +149,8 @@ def _search_albums(*, keyword: str = "", tag: str = "", author: str = "",
 
 # ── 下载 & PDF ──
 
-def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tuple:
+def _download_images(album_id: int, download_dir: Path, threads: int = 45,
+                     *, progress_cb=None) -> tuple:
     """下载图片, 返回 (album_obj, image_dir, images[], title, desc).
 
     progress_cb: callable(pct: int) 每下载一张回调一次.
@@ -175,7 +176,18 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45) -> tu
     except Exception as e:
         raise JMDownError(f"获取本子信息失败: {e}") from e
 
-    # jmcomic 插件系统不支持简单回调，跳过进度追踪以免崩溃
+    # 注册下载进度插件
+    total_pages = 0
+    try:
+        first_pid = album_detail.episode_list[0][0] if album_detail.episode_list else None
+        if first_pid:
+            photo = client.get_photo_detail(int(first_pid))
+            total_pages = len(photo) if hasattr(photo, "__len__") else 0
+    except Exception:
+        pass
+    _dl_info = {"n": 0, "total": total_pages, "t0": time.time(), "cb": progress_cb}
+    if progress_cb and total_pages > 0:
+        opt.plugins.after_photo = [{"plugin": "_jmdown_pct", "kwargs": {"info": _dl_info}}]
 
     # 用 download_photo 只下单章（不下挂载章节），避免覆盖
     try:
@@ -240,6 +252,29 @@ def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85,
     finally:
         for t in temps:
             t.unlink(missing_ok=True)
+
+
+# ── jmcomic 下载进度插件（类注册制） ──
+
+class _JMDownPctPlugin(jmcomic.jm_plugin.JmOptionPlugin):
+    """每下一张图回调 after_photo, 更新下载进度。"""
+    def after_photo(self, photo, downloader):
+        info = self.kwargs.get("info")
+        if not info:
+            return
+        info["n"] += 1
+        cb = info.get("cb")
+        if cb:
+            n = info["n"]
+            total = info["total"]
+            pct = min(int(n / total * 100), 100) if total > 0 else 0
+            elapsed = time.time() - info["t0"]
+            speed = (n * 1.5 * 1024 * 1024) / elapsed if elapsed > 0 else 0
+            cb(pct, _fmt(speed) + "/s")
+
+_JMDownPctPlugin.plugin_key = "_jmdown_pct"
+from jmcomic.jm_config import JmModuleConfig
+JmModuleConfig.REGISTRY_PLUGIN["_jmdown_pct"] = _JMDownPctPlugin
 
 
 def _fmt(b: int) -> str:
@@ -624,8 +659,11 @@ class JMdownPlugin(BasePlugin):
 
             threads = int(self.plugin_cfg.get("download_threads", 45))
             # jmcomic 同步阻塞 + 自建线程池, 丢到线程避免冻结事件循环 (ctrl+c 才能打断)
+            def _dl_progress(pct: int, spd: str):
+                state.phases["下载"] = f"{pct}% ({spd})"
             album_obj, image_dir, images, title, description = await asyncio.to_thread(
                 _download_images, aid, self._download_dir, threads,
+                progress_cb=_dl_progress,
             )
             state.phases["下载"] = "已完成"
 
