@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import secrets
+import string
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -150,7 +154,7 @@ def _search_albums(*, keyword: str = "", tag: str = "", author: str = "",
 # ── 下载 & PDF ──
 
 def _download_images(album_id: int, download_dir: Path, threads: int = 45,
-                     *, progress_cb=None) -> tuple:
+                     *, progress_cb=None, max_pages: int = 0) -> tuple:
     """下载图片, 返回 (album_obj, image_dir, images[], title, desc).
 
     progress_cb: callable(pct: int) 每下载一张回调一次.
@@ -185,6 +189,8 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45,
             total_pages = len(photo) if hasattr(photo, "__len__") else 0
     except Exception:
         pass
+    if max_pages > 0 and total_pages > max_pages:
+        raise JMDownError(f"本子 {album_id} 共 {total_pages} 页, 超过限制 {max_pages} 页, 已拒绝下载")
     _dl_info = {"n": 0, "total": total_pages, "t0": time.time(), "cb": progress_cb}
     if progress_cb and total_pages > 0:
         opt.plugins.after_photo = [{"plugin": "_jmdown_pct", "kwargs": {"info": _dl_info}}]
@@ -302,8 +308,6 @@ def _generate_password(custom: str = "") -> str:
     """生成加密密码。custom 非空则用自定义，否则随机16位。"""
     if custom:
         return custom
-    import secrets
-    import string
     chars = string.ascii_letters + string.digits + "!@#$%^&*"
     return "".join(secrets.choice(chars) for _ in range(16))
 
@@ -343,6 +347,7 @@ class JMdownPlugin(BasePlugin):
 
     def __init__(self, ctx: PluginContext, cfg: dict):
         super().__init__(ctx, cfg)
+        self._phase_lock = threading.Lock()
         self._data_dir: Optional[Path] = None
         self._download_dir: Optional[Path] = None
         self._cache_dir: Optional[Path] = None
@@ -369,6 +374,9 @@ class JMdownPlugin(BasePlugin):
         self._max_cache = int(self.plugin_cfg.get("max_cache", 10))
         self._desc_max_length = int(self.plugin_cfg.get("desc_max_length", 80))
         self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
+        self._download_threads = max(1, int(self.plugin_cfg.get("download_threads", 45)))
+        self._max_pages = max(0, int(self.plugin_cfg.get("max_pages", 0)))
+        self._max_file_size = max(0, int(self.plugin_cfg.get("max_file_size_mb", 0)))
         self._upload_timeout = max(1, int(self.plugin_cfg.get("upload_timeout", 300)))
         self._chunk_size = min(
             16 * 1024 * 1024,  # NapCat WS 帧上限
@@ -378,6 +386,11 @@ class JMdownPlugin(BasePlugin):
         self._content_query = bool(self.plugin_cfg.get("content_query", False))
         self._block_content_tools = bool(self.plugin_cfg.get("block_content_tools", True))
         self._zip_encrypt = bool(self.plugin_cfg.get("zip_encrypt", False))
+        if self._zip_encrypt:
+            try:
+                import pyzipper  # noqa: F401
+            except ImportError:
+                raise RuntimeError("zip_encrypt=True 但 pyzipper 未安装：pip install pyzipper>=0.4")
         self._custom_password = str(self.plugin_cfg.get("custom_password", ""))
         self._max_concurrent = max(1, int(self.plugin_cfg.get("max_concurrent", 2)))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
@@ -731,6 +744,13 @@ class JMdownPlugin(BasePlugin):
                     upload_path = str(zip_path.resolve())
                     state.phases["合成"] = "ZIP"
 
+                
+            # 文件大小检查
+            if self._max_file_size > 0:
+                mb = Path(upload_path).stat().st_size / (1024 * 1024)
+                if mb > self._max_file_size:
+                    raise JMDownError(f"文件大小 ({mb:.0f} MB) 超过限制 ({self._max_file_size} MB)")
+
                 from .napcat_stream import send_file_via_stream
                 _ul_to = self._upload_timeout + 30
                 send_result = await self._upload_with_watchdog(
@@ -765,13 +785,17 @@ class JMdownPlugin(BasePlugin):
                 # jmcomic after_photo 同步回调, 只能存值
                 pass
 
-            threads = int(self.plugin_cfg.get("download_threads", 45))
+            threads = self._download_threads
             # jmcomic 同步阻塞 + 自建线程池, 丢到线程避免冻结事件循环 (ctrl+c 才能打断)
             def _dl_progress(pct: int, spd: str):
-                state.phases["下载"] = f"{pct}% ({spd})"
-            album_obj, image_dir, images, title, description = await asyncio.to_thread(
-                _download_images, aid, self._download_dir, threads,
-                progress_cb=_dl_progress,
+                with self._phase_lock:
+                    state.phases["下载"] = f"{pct}% ({spd})"
+            album_obj, image_dir, images, title, description = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _download_images, aid, self._download_dir, threads,
+                    progress_cb=_dl_progress, max_pages=self._max_pages,
+                ),
+                timeout=max(self._upload_timeout * 3, 600),
             )
             state.phases["下载"] = "已完成"
 
@@ -783,8 +807,11 @@ class JMdownPlugin(BasePlugin):
             def _pdf_progress(pct: int):
                 state.phases["合成"] = f"{pct}%"
 
-            size = await asyncio.to_thread(
-                _images_to_pdf, images, pdf_path, self._pdf_quality, _pdf_progress,
+            size = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _images_to_pdf, images, pdf_path, self._pdf_quality, _pdf_progress,
+                ),
+                timeout=max(self._upload_timeout * 3, 600),
             )
             _rmtree(image_dir)
             state.phases["合成"] = "已完成"
@@ -814,6 +841,13 @@ class JMdownPlugin(BasePlugin):
 
             async def _upload_progress(pct: int, spd: str):
                 state.phases["上传"] = f"{pct}% ({spd})"
+
+            
+            # 文件大小检查
+            if self._max_file_size > 0:
+                mb = Path(upload_path).stat().st_size / (1024 * 1024)
+                if mb > self._max_file_size:
+                    raise JMDownError(f"文件大小 ({mb:.0f} MB) 超过限制 ({self._max_file_size} MB)")
 
             from .napcat_stream import send_file_via_stream
             _ul_timeout = self._upload_timeout + 30
@@ -847,11 +881,15 @@ class JMdownPlugin(BasePlugin):
 
             await self._send_completion_notice(sid, state)
 
-        except Exception as e:
+        except BaseException as e:
             state.status = "failed"
             state.elapsed = time.time() - state.started_at
-            state.error = str(e)
-            logger.error(f"#{aid} 后台任务失败: {e}")
+            if isinstance(e, asyncio.CancelledError):
+                state.error = "任务已被取消"
+                logger.warning(f"#{aid} 后台任务被取消")
+            else:
+                state.error = str(e)
+                logger.error(f"#{aid} 后台任务失败: {e}")
             await self._send_completion_notice(sid, state)
         finally:
             self._cleanup_task(state)

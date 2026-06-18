@@ -29,7 +29,11 @@ async def recv_matching(ws, echo_prefix: str, timeout: int = 300):
 
 
 async def test():
-    user_id = sys.argv[1] if len(sys.argv) > 1 else "2263130787"
+    user_id = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("TEST_QQ_ID", "")
+    if not user_id:
+        print("Usage: python test_send.py <user_id>")
+        print("Or set TEST_QQ_ID environment variable")
+        sys.exit(1)
 
     cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
     qq_cfg = None
