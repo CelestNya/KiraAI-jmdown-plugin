@@ -10,8 +10,6 @@
 | `max_concurrent` | `integer` | 2 | 同时最多下载任务数 |
 | `chunk_size` | `integer` | 524288 | Stream 分片字节数，默认 512KB |
 | `pdf_quality` | `integer` | 85 | JPEG 质量 (1-100) |
-| `max_pages` | `integer` | 0 | 最大允许页数，0 不限制 |
-| `max_file_size_mb` | `integer` | 0 | 最大允许文件大小（MB），0 不限制 |
 | `upload_timeout` | `integer` | 300 | 上传超时秒数 |
 | `notify_llm` | `switch` | true | 完成后是否触发 LLM 回复 |
 | `content_query` | `switch` | false | 允许搜索和查看本子元信息 |
@@ -52,16 +50,6 @@
         "type": "integer",
         "default": 85,
         "hint": "JPEG 质量 (1-100)，越高文件越大画质越好"
-    },
-    "max_pages": {
-        "type": "integer",
-        "default": 0,
-        "hint": "最大允许下载页数，0 为不限制。超过此页数拒绝下载，避免文件过大"
-    },
-    "max_file_size_mb": {
-        "type": "integer",
-        "default": 0,
-        "hint": "最大允许文件大小（MB），0 为不限制。文件超过此大小拒绝发送，避免超时失败"
     },
     "upload_timeout": {
         "type": "integer",

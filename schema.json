@@ -24,16 +24,6 @@
         "default": 85,
         "hint": "JPEG 质量 (1-100)，越高文件越大画质越好"
     },
-    "max_pages": {
-        "type": "integer",
-        "default": 0,
-        "hint": "最大允许下载页数，0 为不限制。超过此页数拒绝下载，避免文件过大"
-    },
-    "max_file_size_mb": {
-        "type": "integer",
-        "default": 0,
-        "hint": "最大允许文件大小（MB），0 为不限制。文件超过此大小拒绝发送，避免超时失败"
-    },
     "chunk_size": {
         "type": "integer",
         "default": 524288,

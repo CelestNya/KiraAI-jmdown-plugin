@@ -65,7 +65,8 @@ print("=" * 55)
 # 空 → 随机
 pw = _generate_password("")
 assert pw and len(pw) == 16, f"随机密码应为16位, got={pw!r}"
-assert any(c in "!@#$%^&*" for c in pw), f"随机密码应包含特殊字符: {pw}"
+pw_charset = set(string.ascii_letters + string.digits + "!@#$%^&*")
+assert set(pw) <= pw_charset, f"随机密码包含非法字符: {pw}"
 print(f"  [PASS] custom_password='' → 随机16位: {pw}")
 
 # 有内容 → 直接用

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import secrets
 import string
 import threading
@@ -154,7 +153,7 @@ def _search_albums(*, keyword: str = "", tag: str = "", author: str = "",
 # ── 下载 & PDF ──
 
 def _download_images(album_id: int, download_dir: Path, threads: int = 45,
-                     *, progress_cb=None, max_pages: int = 0) -> tuple:
+                     *, progress_cb=None) -> tuple:
     """下载图片, 返回 (album_obj, image_dir, images[], title, desc).
 
     progress_cb: callable(pct: int) 每下载一张回调一次.
@@ -189,8 +188,6 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45,
             total_pages = len(photo) if hasattr(photo, "__len__") else 0
     except Exception:
         pass
-    if max_pages > 0 and total_pages > max_pages:
-        raise JMDownError(f"本子 {album_id} 共 {total_pages} 页, 超过限制 {max_pages} 页, 已拒绝下载")
     _dl_info = {"n": 0, "total": total_pages, "t0": time.time(), "cb": progress_cb}
     if progress_cb and total_pages > 0:
         opt.plugins.after_photo = [{"plugin": "_jmdown_pct", "kwargs": {"info": _dl_info}}]
@@ -375,8 +372,6 @@ class JMdownPlugin(BasePlugin):
         self._desc_max_length = int(self.plugin_cfg.get("desc_max_length", 80))
         self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
         self._download_threads = max(1, int(self.plugin_cfg.get("download_threads", 45)))
-        self._max_pages = max(0, int(self.plugin_cfg.get("max_pages", 0)))
-        self._max_file_size = max(0, int(self.plugin_cfg.get("max_file_size_mb", 0)))
         self._upload_timeout = max(1, int(self.plugin_cfg.get("upload_timeout", 300)))
         self._chunk_size = min(
             16 * 1024 * 1024,  # NapCat WS 帧上限
@@ -745,11 +740,6 @@ class JMdownPlugin(BasePlugin):
                     state.phases["合成"] = "ZIP"
 
                 
-            # 文件大小检查
-            if self._max_file_size > 0:
-                mb = Path(upload_path).stat().st_size / (1024 * 1024)
-                if mb > self._max_file_size:
-                    raise JMDownError(f"文件大小 ({mb:.0f} MB) 超过限制 ({self._max_file_size} MB)")
 
                 from .napcat_stream import send_file_via_stream
                 _ul_to = self._upload_timeout + 30
@@ -793,7 +783,7 @@ class JMdownPlugin(BasePlugin):
             album_obj, image_dir, images, title, description = await asyncio.wait_for(
                 asyncio.to_thread(
                     _download_images, aid, self._download_dir, threads,
-                    progress_cb=_dl_progress, max_pages=self._max_pages,
+                    progress_cb=_dl_progress,
                 ),
                 timeout=max(self._upload_timeout * 3, 600),
             )
@@ -843,11 +833,6 @@ class JMdownPlugin(BasePlugin):
                 state.phases["上传"] = f"{pct}% ({spd})"
 
             
-            # 文件大小检查
-            if self._max_file_size > 0:
-                mb = Path(upload_path).stat().st_size / (1024 * 1024)
-                if mb > self._max_file_size:
-                    raise JMDownError(f"文件大小 ({mb:.0f} MB) 超过限制 ({self._max_file_size} MB)")
 
             from .napcat_stream import send_file_via_stream
             _ul_timeout = self._upload_timeout + 30
