@@ -16,6 +16,11 @@ from typing import Optional
 
 from core.plugin import logger
 
+
+class NapCatConfigError(RuntimeError):
+    """NapCat 配置错误（适配器/客户端不可用）"""
+    pass
+
 CHUNK_SIZE = 512 * 1024  # 512KB — 减少 round-trip 次数, NapCat 帧上限 16MB
 
 
@@ -138,10 +143,10 @@ async def send_file_via_stream(
     # 动态查找 platform=QQ 的 adapter，不硬编码注册名
     adapter = _find_qq_adapter(ctx.adapter_mgr)
     if adapter is None:
-        raise RuntimeError("QQ 适配器不可用，无法流传输")
+        raise NapCatConfigError("QQ 适配器不可用，无法流传输")
     client = adapter.get_client()
     if client is None:
-        raise RuntimeError("NapCat 客户端未初始化")
+        raise NapCatConfigError("NapCat 客户端未初始化")
     file_name = os.path.basename(file_path)
 
     # 1. 分片上传到 NapCat temp
