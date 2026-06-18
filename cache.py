@@ -7,7 +7,7 @@ JMComic 下载器 — 缓存模块
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +30,7 @@ class CacheIndex:
         self._path = index_path
         self._max = max_entries
         self._entries: list[CacheEntry] = []
+        self._load_error = False
         self._load()
 
     def get(self, album_id: int) -> Optional[CacheEntry]:
@@ -55,10 +56,12 @@ class CacheIndex:
             return
         try:
             raw = json.loads(self._path.read_text("utf-8"))
-            self._entries = [CacheEntry(**e) for e in raw]
-        except Exception as exc:
-            # logger unavailable here in standalone context
-            self._entries = []
+            known = {f.name for f in fields(CacheEntry)}
+            self._entries = [CacheEntry(**{k: v for k, v in e.items() if k in known})
+                             for e in raw]
+        except Exception:
+            # logger unavailable in standalone context; caller checks _load_error
+            self._load_error = True
 
     def _save(self):
         self._path.parent.mkdir(parents=True, exist_ok=True)

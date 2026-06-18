@@ -359,6 +359,7 @@ class JMdownPlugin(BasePlugin):
         self._task_registry: dict[str, TaskState] = {}   # job_id → state
         self._task_counter: int = 0
         self._running_tasks: dict[int, asyncio.Task] = {}   # album_id → task
+        self._orphan_aids: set[int] = set()
 
     async def initialize(self):
         self._data_dir = self.ctx.get_plugin_data_dir() or Path("data/plugin_data/jmdown")
@@ -389,7 +390,8 @@ class JMdownPlugin(BasePlugin):
         self._custom_password = str(self.plugin_cfg.get("custom_password", ""))
         self._max_concurrent = max(1, int(self.plugin_cfg.get("max_concurrent", 2)))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
-        self._clean_orphans()
+        if not self._cache._load_error:
+            self._clean_orphans()
 
         # content_query=false 时：block_content_tools=true 不注册，false 仅拦截
         from core.plugin.plugin_registry import _plugin_components
@@ -436,7 +438,7 @@ class JMdownPlugin(BasePlugin):
         """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。"""
         try:
             return await asyncio.wait_for(upload_coro, timeout=timeout)
-        except (asyncio.CancelledError, TimeoutError):
+        except TimeoutError:
             raise TimeoutError("上传超时, 已取消")
 
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
@@ -482,6 +484,9 @@ class JMdownPlugin(BasePlugin):
         if album_id <= 0:
             return "错误: album_id 须为正整数"
 
+        if album_id in self._orphan_aids:
+            return f"#{album_id} 上一个任务正在退出清理，请稍后重试"
+
         # 全局并发限制
         if len(self._running_tasks) >= self._max_concurrent:
             return (
@@ -495,7 +500,7 @@ class JMdownPlugin(BasePlugin):
         if _task and not _task.done():
             _elapsed = time.time() - next(
                 (s.started_at for s in self._task_registry.values()
-                 if s.album_id == album_id),
+                 if s.album_id == album_id and s.status == "running"),
                 time.time(),
             )
             if _elapsed > self._upload_timeout + 120:
@@ -514,7 +519,7 @@ class JMdownPlugin(BasePlugin):
 
         # 生成 Job ID
         self._task_counter += 1
-        job_id = f"JOB-{datetime.now().strftime('%y%m%d')}-{self._task_counter:03d}"
+        job_id = f"JOB-{secrets.token_urlsafe(8)}"
 
         try:
             _parse_target(target)  # 提前校验 target 格式
@@ -742,11 +747,12 @@ class JMdownPlugin(BasePlugin):
                 
 
                 from .napcat_stream import send_file_via_stream
-                _ul_to = self._upload_timeout + 30
+                _chunk_to = max(10, self._upload_timeout // 10)
+                _ul_to = self._upload_timeout + 120
                 send_result = await self._upload_with_watchdog(
                     send_file_via_stream(
                         self.ctx, sid, user_id, upload_path,
-                        is_group, group_id, self._upload_timeout,
+                        is_group, group_id, _chunk_to,
                         progress_cb=_cache_upload_progress,
                         chunk_size=self._chunk_size,
                     ),
@@ -755,6 +761,7 @@ class JMdownPlugin(BasePlugin):
                 state.phases["上传"] = "已完成"
                 state.phases["发送"] = "已完成"
                 state.status = "done"
+                state.elapsed = time.time() - state.started_at
                 state.result = {
                     "title": cached.title,
                     "description": cached.description,
@@ -835,11 +842,12 @@ class JMdownPlugin(BasePlugin):
             
 
             from .napcat_stream import send_file_via_stream
-            _ul_timeout = self._upload_timeout + 30
+            _chunk_to = max(10, self._upload_timeout // 10)
+            _ul_timeout = self._upload_timeout + 120
             send_result = await self._upload_with_watchdog(
                 send_file_via_stream(
                     self.ctx, sid, user_id, str(upload_path.resolve()),
-                    is_group, group_id, self._upload_timeout,
+                    is_group, group_id, _chunk_to,
                     progress_cb=_upload_progress,
                     chunk_size=self._chunk_size,
                 ),
@@ -869,15 +877,28 @@ class JMdownPlugin(BasePlugin):
         except BaseException as e:
             state.status = "failed"
             state.elapsed = time.time() - state.started_at
+            # 追踪 TimeoutError（下载/合成/ZIP 超时）残留在 executor 里的 orphan 线程
+            # 当 _elapsed > self._upload_timeout * 3 时视为线程已耗尽，可以被覆盖
+            # 但短时间内的超时仍可能冲突，延迟释放
+            if isinstance(e, TimeoutError):
+                self._orphan_aids.add(aid)
+                asyncio.create_task(self._release_orphan_after(aid, self._upload_timeout * 3))
+
             if isinstance(e, asyncio.CancelledError):
                 state.error = "任务已被取消"
                 logger.warning(f"#{aid} 后台任务被取消")
+                await self._send_completion_notice(sid, state)
+                raise
             else:
                 state.error = str(e)
                 logger.error(f"#{aid} 后台任务失败: {e}")
             await self._send_completion_notice(sid, state)
         finally:
             self._cleanup_task(state)
+
+    async def _release_orphan_after(self, aid: int, delay: int):
+        await asyncio.sleep(delay)
+        self._orphan_aids.discard(aid)
 
     def _cleanup_task(self, state: TaskState):
         self._running_tasks.pop(state.album_id, None)
@@ -935,12 +956,18 @@ class JMdownPlugin(BasePlugin):
         for e in entries:
             p = Path(e.pdf_path)
             if p.exists():
-                p.unlink()
-                logger.info(f"淘汰缓存: {p.name}")
+                try:
+                    p.unlink()
+                    logger.info(f"淘汰缓存: {p.name}")
+                except OSError:
+                    logger.warning(f"淘汰缓存失败（文件被占用）: {p.name}")
             # 清理对应的 ZIP 文件
             zip_p = p.with_suffix(".zip")
             if zip_p.exists():
-                zip_p.unlink()
+                try:
+                    zip_p.unlink()
+                except OSError:
+                    pass
             img_dir = self._download_dir / str(e.album_id)
             if img_dir.exists():
                 _rmtree(img_dir)
