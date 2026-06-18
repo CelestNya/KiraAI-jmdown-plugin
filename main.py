@@ -298,14 +298,14 @@ def _linked_episodes(album) -> list[dict]:
 
 # ── ZIP / 加密 ──
 
-def _generate_password(random_pw: bool, custom: str = "") -> str:
-    """生成加密密码。random_pw=true → 随机16位, false → 自定义。"""
-    if random_pw:
-        import secrets
-        import string
-        chars = string.ascii_letters + string.digits + "!@#$%^&*"
-        return "".join(secrets.choice(chars) for _ in range(16))
-    return custom or "jmdown"
+def _generate_password(custom: str = "") -> str:
+    """生成加密密码。custom 非空则用自定义，否则随机16位。"""
+    if custom:
+        return custom
+    import secrets
+    import string
+    chars = string.ascii_letters + string.digits + "!@#$%^&*"
+    return "".join(secrets.choice(chars) for _ in range(16))
 
 
 def _create_zip(pdf_path: Path, zip_path: Path, password: str = "") -> int:
@@ -375,13 +375,39 @@ class JMdownPlugin(BasePlugin):
             max(4096, int(self.plugin_cfg.get("chunk_size", 512 * 1024))),
         )
         self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
-        self._content_query = bool(self.plugin_cfg.get("content_query", True))
+        self._content_query = bool(self.plugin_cfg.get("content_query", False))
+        self._block_content_tools = bool(self.plugin_cfg.get("block_content_tools", True))
         self._zip_encrypt = bool(self.plugin_cfg.get("zip_encrypt", False))
-        self._random_password = bool(self.plugin_cfg.get("random_password", True))
         self._custom_password = str(self.plugin_cfg.get("custom_password", ""))
         self._max_concurrent = max(1, int(self.plugin_cfg.get("max_concurrent", 2)))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         self._clean_orphans()
+
+        # content_query=false 时：block_content_tools=true 不注册，false 仅拦截
+        from core.plugin.plugin_registry import _plugin_components
+        pid = self.ctx.plugin_mgr.get_plugin_id_for_module(__name__)
+        comp = _plugin_components.get(pid)
+        if comp and not self._content_query and self._block_content_tools:
+            # 首次备份
+            if not hasattr(self.__class__, "_hidden_tool_backup"):
+                self.__class__._hidden_tool_backup = {}
+                for name in ("query_jm_album", "search_jm_album"):
+                    if name in comp.tools:
+                        self.__class__._hidden_tool_backup[name] = {
+                            "def": comp.tools[name],
+                            "func": comp.tool_funcs[name],
+                        }
+            for name in ("query_jm_album", "search_jm_album"):
+                comp.tools.pop(name, None)
+                comp.tool_funcs.pop(name, None)
+        elif comp and (self._content_query or not self._block_content_tools) \
+                and hasattr(self.__class__, "_hidden_tool_backup"):
+            # content_query=true 或 block=false → 恢复工具（block=false 时保留工具仅拦截）
+            for name in ("query_jm_album", "search_jm_album"):
+                if name not in comp.tools and name in self.__class__._hidden_tool_backup:
+                    bk = self.__class__._hidden_tool_backup[name]
+                    comp.tools[name] = bk["def"]
+                    comp.tool_funcs[name] = bk["func"]
 
         # 静音 jmcomic 的冗赘日志（下载进度、API 报错等）
         logging.getLogger("jmcomic").setLevel(logging.WARNING)
@@ -399,31 +425,11 @@ class JMdownPlugin(BasePlugin):
         logger.info("JMdown 已终止")
 
     async def _upload_with_watchdog(self, upload_coro, timeout: int) -> str:
-        """上传带看门狗：进度连续 40s 不变视为停滞，取消上传。"""
-        _ul_last = [""]
-
-        async def _watchdog():
-            while True:
-                await asyncio.sleep(20)
-                cur = _ul_last[0]
-                if not cur:
-                    continue
-                if getattr(_watchdog, "_last", None) == cur:
-                    raise TimeoutError("上传进度停滞超过 40s")
-                _watchdog._last = cur
-
-        async def _progress_hook(pct: int, spd: str):
-            _ul_last[0] = f"{pct}%"
-
-        # 注入进度钩子到 upload_coro（通过替换 progress_cb 参数）
-        # 这里不直接改 upload_coro，由调用方传带钩子的 progress_cb
-        wd_task = asyncio.create_task(_watchdog())
+        """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。"""
         try:
             return await asyncio.wait_for(upload_coro, timeout=timeout)
         except (asyncio.CancelledError, TimeoutError):
-            raise TimeoutError("上传进度停滞, 已取消")
-        finally:
-            wd_task.cancel()
+            raise TimeoutError("上传超时, 已取消")
 
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
         """通过会话发送进度通知。mentioned=True 会触发目标会话 LLM 回复。"""
@@ -487,15 +493,16 @@ class JMdownPlugin(BasePlugin):
             if _elapsed > self._upload_timeout + 120:
                 _task.cancel()
                 self._running_tasks.pop(album_id, None)
+                # 死任务，fallthrough 到重新提交
             else:
                 existing = next(
                     (s for s in self._task_registry.values()
                      if s.album_id == album_id and s.status == "running"),
                     None,
-            )
-            if existing:
-                return f"#{album_id} 已在下载队列中，标识码: {existing.job_id}"
-            return f"#{album_id} 已在下载队列中"
+                )
+                if existing:
+                    return f"#{album_id} 已在下载队列中，标识码: {existing.job_id}"
+                return f"#{album_id} 已在下载队列中"
 
         # 生成 Job ID
         self._task_counter += 1
@@ -555,14 +562,17 @@ class JMdownPlugin(BasePlugin):
     )
     async def query_jm_album(self, _event, album_id: int) -> str:
         if not self._content_query:
-            return "因内容审核要求，本子信息查询功能已关闭"
+            logger.debug(f"query_jm_album(#{album_id}) 被拦截: content_query 关闭")
+            return "因内容审核要求，本子信息查询功能已关闭。但你仍然可以直接发送该本子"
         if album_id <= 0:
             return "错误: album_id 须为正整数"
         try:
             info = _fetch_album_meta(album_id)
         except JMDownError as e:
             return f"错误: {e}"
-        return self._format_album_info(info)
+        result = self._format_album_info(info)
+        logger.debug(f"query_jm_album(#{album_id}) -> {len(result)} chars")
+        return result
 
     # ── 工具: 搜索本子 ──
 
@@ -590,6 +600,7 @@ class JMdownPlugin(BasePlugin):
                                author: str = "", work: str = "",
                                page: int = 1, order_by: str = "relevance") -> str:
         if not self._content_query:
+            logger.debug(f"search_jm_album(keyword={keyword!r}, tag={tag!r}, author={author!r}, work={work!r}) 被拦截: content_query 关闭")
             return "因内容审核要求，搜索功能已关闭"
         if not any([keyword, tag, author, work]):
             return "错误: 至少指定 keyword、tag、author、work 之一"
@@ -615,7 +626,9 @@ class JMdownPlugin(BasePlugin):
         # 只在第一页加提示
         if page == 1:
             lines.append("---\n注: 可用 query_jm_album 查看详情, send_jm_album 下载, 翻页请指定 page 参数")
-        return "\n".join(lines)
+        result = "\n".join(lines)
+        logger.debug(f"search_jm_album -> {len(result)} chars, {total} total results")
+        return result
 
     def _format_album_info(self, info: dict) -> str:
         ml = self._desc_max_length
@@ -712,7 +725,7 @@ class JMdownPlugin(BasePlugin):
                 password = ""
                 upload_path = cached.pdf_path
                 if self._zip_encrypt:
-                    password = _generate_password(self._random_password, self._custom_password)
+                    password = _generate_password(self._custom_password)
                     zip_path = self._cache_dir / f"{aid}.zip"
                     await asyncio.to_thread(_create_zip, Path(cached.pdf_path), zip_path, password)
                     upload_path = str(zip_path.resolve())
@@ -789,7 +802,7 @@ class JMdownPlugin(BasePlugin):
             password = ""
             upload_path = pdf_path
             if self._zip_encrypt:
-                password = _generate_password(self._random_password, self._custom_password)
+                password = _generate_password(self._custom_password)
                 zip_path = self._cache_dir / f"{aid}.zip"
                 await asyncio.to_thread(_create_zip, pdf_path, zip_path, password)
                 size = zip_path.stat().st_size
@@ -901,6 +914,10 @@ class JMdownPlugin(BasePlugin):
             if p.exists():
                 p.unlink()
                 logger.info(f"淘汰缓存: {p.name}")
+            # 清理对应的 ZIP 文件
+            zip_p = p.with_suffix(".zip")
+            if zip_p.exists():
+                zip_p.unlink()
             img_dir = self._download_dir / str(e.album_id)
             if img_dir.exists():
                 _rmtree(img_dir)
@@ -911,6 +928,9 @@ class JMdownPlugin(BasePlugin):
             if f.suffix == ".pdf" and f.stem.isdigit() and int(f.stem) not in known:
                 f.unlink()
                 logger.info(f"清理孤儿: {f.name}")
+            if f.suffix == ".zip" and f.stem.isdigit() and int(f.stem) not in known:
+                f.unlink()
+                logger.info(f"清理孤立 ZIP: {f.name}")
         for d in self._download_dir.iterdir():
             if d.is_dir() and d.name.isdigit() and int(d.name) not in known:
                 _rmtree(d)

@@ -19,6 +19,11 @@
         "default": 2,
         "hint": "同时最多下载任务数，防止大规模批量下载占用资源"
     },
+    "pdf_quality": {
+        "type": "integer",
+        "default": 85,
+        "hint": "JPEG 质量 (1-100)，越高文件越大画质越好"
+    },
     "chunk_size": {
         "type": "integer",
         "default": 524288,
@@ -37,21 +42,21 @@
     "content_query": {
         "type": "switch",
         "default": false,
-        "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 将不可用，避免 LLM 内容审查"
+        "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 受下方开关控制"
+    },
+    "block_content_tools": {
+        "type": "switch",
+        "default": true,
+        "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用"
     },
     "zip_encrypt": {
         "type": "switch",
         "default": false,
-        "hint": "压缩并加密为 ZIP（AES-256），绕过 QQ 内容审查"
-    },
-    "random_password": {
-        "type": "switch",
-        "default": true,
-        "hint": "true=随机强密码, false=使用下方自定义密码"
+        "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩"
     },
     "custom_password": {
         "type": "string",
         "default": "",
-        "hint": "自定义加密密码（需关闭 random_password 才生效）"
+        "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）"
     }
 }

@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-2.8.0-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.9.0-blue)](manifest.json)
 
 **jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 分片流传输发送到 QQ。
 
@@ -41,7 +41,7 @@ git clone https://github.com/CelestNya/KiraAI-jmdown-plugin.git jmdown
 2. 安装依赖（KiraAI 自动安装，也可手动）：
 
 ```bash
-pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6
+pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6 pyzipper>=0.4
 ```
 
 3. 重启 KiraAI，插件自动加载。
@@ -125,16 +125,16 @@ LLM → 告知用户任务已提交
 | `pdf_quality` | integer | 85 | JPEG 质量 (1-100) |
 | `upload_timeout` | integer | 300 | 上传超时秒数 |
 | `notify_llm` | switch | true | 完成后是否触发 LLM 回复 |
-| `content_query` | switch | false | 允许搜索和查看本子元信息。默认关闭避免 LLM 内容审查 |
-| `zip_encrypt` | switch | false | 压缩并加密为 ZIP（AES-256），绕过 QQ 内容审查 |
-| `random_password` | switch | true | true=随机强密码, false=自定义密码 |
-| `custom_password` | string | "" | `random_password=false` 时生效 |
+| `content_query` | switch | false | 允许搜索和查看本子元信息。关闭后受 `block_content_tools` 控制 |
+| `block_content_tools` | switch | true | content_query 关闭时：true=不注册工具，false=保留但返回拦截提示 |
+| `zip_encrypt` | switch | false | 开启后加密 ZIP（AES-256）。关闭后直接发原始 PDF |
+| `custom_password` | string | "" | 自定义密码，留空自动随机生成（需开启 `zip_encrypt`） |
 
 ## 缓存位置
 
 - **PDF 缓存**：`data/plugin_data/jmdown/cache/`
 - **索引文件**：`data/plugin_data/jmdown/cache_index.json`
-- **下载临时目录**：`data/plugin_data/jmdown/download/`
+- **下载临时目录**：`data/plugin_data/jmdown/downloads/`
 
 ## 技术要点
 

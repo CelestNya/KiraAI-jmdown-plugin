@@ -1,7 +1,7 @@
 {
     "display_name": "JMComic 下载器",
     "plugin_id": "jmdown",
-    "version": "2.8.0",
+    "version": "2.9.0",
     "author": "CelestNya",
     "description": "下载禁漫天堂 (JMComic) 本子并合成为 PDF，包含了完整的后台发送功能",
     "tags": ["下载", "漫画", "JMComic", "PDF", "QQ"],
