@@ -1,14 +1,4 @@
 {
-    "max_cache": {
-        "type": "integer",
-        "default": 10,
-        "hint": "最多缓存几本 PDF，超限自动删最旧"
-    },
-    "desc_max_length": {
-        "type": "integer",
-        "default": 80,
-        "hint": "描述截取字符数"
-    },
     "download_threads": {
         "type": "integer",
         "default": 45,
@@ -19,25 +9,40 @@
         "default": 2,
         "hint": "同时最多下载任务数，防止大规模批量下载占用资源"
     },
-    "pdf_quality": {
+    "upload_timeout": {
         "type": "integer",
-        "default": 85,
-        "hint": "JPEG 质量 (1-100)，越高文件越大画质越好"
+        "default": 300,
+        "hint": "上传超时秒数（大文件建议 300+）"
     },
     "chunk_size": {
         "type": "integer",
         "default": 524288,
         "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB"
     },
-    "upload_timeout": {
+    "pdf_quality": {
         "type": "integer",
-        "default": 300,
-        "hint": "上传超时秒数（大文件建议 300+）"
+        "default": 85,
+        "hint": "JPEG 质量 (1-100)，越高文件越大画质越好"
     },
-    "notify_llm": {
+    "zip_encrypt": {
         "type": "switch",
-        "default": true,
-        "hint": "任务完成后是否在目标会话触发 LLM 自动回复"
+        "default": false,
+        "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩"
+    },
+    "custom_password": {
+        "type": "string",
+        "default": "",
+        "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）"
+    },
+    "max_cache": {
+        "type": "integer",
+        "default": 10,
+        "hint": "最多缓存几本 PDF，超限自动删最旧"
+    },
+    "desc_max_length": {
+        "type": "integer",
+        "default": 80,
+        "hint": "描述截取字符数"
     },
     "content_query": {
         "type": "switch",
@@ -54,14 +59,9 @@
         "default": false,
         "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话"
     },
-    "zip_encrypt": {
+    "notify_llm": {
         "type": "switch",
-        "default": false,
-        "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩"
-    },
-    "custom_password": {
-        "type": "string",
-        "default": "",
-        "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）"
+        "default": true,
+        "hint": "任务完成后是否在目标会话触发 LLM 自动回复"
     }
 }

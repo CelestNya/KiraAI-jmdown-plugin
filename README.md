@@ -117,19 +117,19 @@ LLM → 告知用户任务已提交
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `max_cache` | integer | 10 | 最多缓存几本 PDF |
-| `desc_max_length` | integer | 80 | 描述截取字符数 |
 | `download_threads` | integer | 45 | 下载图片并行线程 |
 | `max_concurrent` | integer | 2 | 同时最多下载任务数 |
+| `upload_timeout` | integer | 300 | 上传超时秒数 |
 | `chunk_size` | integer | 524288 | Stream 分片字节数，默认 512KB |
 | `pdf_quality` | integer | 85 | JPEG 质量 (1-100) |
-| `upload_timeout` | integer | 300 | 上传超时秒数 |
-| `notify_llm` | switch | true | 完成后是否触发 LLM 回复 |
+| `zip_encrypt` | switch | false | 开启后加密 ZIP（AES-256）。关闭后直接发原始 PDF |
+| `custom_password` | string | "" | 自定义密码，留空自动随机生成（需开启 `zip_encrypt`） |
+| `max_cache` | integer | 10 | 最多缓存几本 PDF |
+| `desc_max_length` | integer | 80 | 描述截取字符数 |
 | `content_query` | switch | false | 允许搜索和查看本子元信息。关闭后受 `block_content_tools` 控制 |
 | `block_content_tools` | switch | true | content_query 关闭时：true=不注册工具，false=保留但返回拦截提示 |
 | `allow_cross_session` | switch | false | 允许转发到其他会话。关闭时 target 只能设为当前会话 |
-| `zip_encrypt` | switch | false | 开启后加密 ZIP（AES-256）。关闭后直接发原始 PDF |
-| `custom_password` | string | "" | 自定义密码，留空自动随机生成（需开启 `zip_encrypt`） |
+| `notify_llm` | switch | true | 完成后是否触发 LLM 回复 |
 
 ## 缓存位置
 
