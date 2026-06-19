@@ -354,6 +354,7 @@ class JMdownPlugin(BasePlugin):
         self._desc_max_length: int = 80
         self._upload_timeout: int = 300
         self._chunk_size: int = 512 * 1024
+        self._allow_cross_session: bool = False
 
         # 后台任务系统
         self._task_registry: dict[str, TaskState] = {}   # job_id → state
@@ -381,6 +382,7 @@ class JMdownPlugin(BasePlugin):
         self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
         self._content_query = bool(self.plugin_cfg.get("content_query", False))
         self._block_content_tools = bool(self.plugin_cfg.get("block_content_tools", True))
+        self._allow_cross_session = bool(self.plugin_cfg.get("allow_cross_session", False))
         self._zip_encrypt = bool(self.plugin_cfg.get("zip_encrypt", False))
         if self._zip_encrypt:
             try:
@@ -525,6 +527,11 @@ class JMdownPlugin(BasePlugin):
             _parse_target(target)  # 提前校验 target 格式
         except JMDownError as e:
             return f"错误: {e}"
+
+        # 跨会话转发校验
+        session = _event.session
+        if session is not None and target != session.sid and not self._allow_cross_session:
+            return f"错误: 不允许转发到其他会话（当前: {session.sid}，目标: {target}）"
 
         # 预查本子是否存在，10s 超时兜底（网络波动 fallthrough 到后台任务）
         try:

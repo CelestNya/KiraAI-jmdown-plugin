@@ -49,6 +49,11 @@
         "default": true,
         "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用"
     },
+    "allow_cross_session": {
+        "type": "switch",
+        "default": false,
+        "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话"
+    },
     "zip_encrypt": {
         "type": "switch",
         "default": false,

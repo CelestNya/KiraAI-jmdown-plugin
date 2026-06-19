@@ -127,6 +127,7 @@ LLM → 告知用户任务已提交
 | `notify_llm` | switch | true | 完成后是否触发 LLM 回复 |
 | `content_query` | switch | false | 允许搜索和查看本子元信息。关闭后受 `block_content_tools` 控制 |
 | `block_content_tools` | switch | true | content_query 关闭时：true=不注册工具，false=保留但返回拦截提示 |
+| `allow_cross_session` | switch | false | 允许转发到其他会话。关闭时 target 只能设为当前会话 |
 | `zip_encrypt` | switch | false | 开启后加密 ZIP（AES-256）。关闭后直接发原始 PDF |
 | `custom_password` | string | "" | 自定义密码，留空自动随机生成（需开启 `zip_encrypt`） |
 

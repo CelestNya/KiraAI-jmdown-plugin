@@ -14,6 +14,7 @@
 | `notify_llm` | `switch` | true | 完成后是否触发 LLM 回复 |
 | `content_query` | `switch` | false | 允许搜索和查看本子元信息 |
 | `block_content_tools` | `switch` | true | content_query 关闭时：true=不注册，false=拦截提示 |
+| `allow_cross_session` | `switch` | false | 允许转发到其他会话，关闭时 target 只能设为当前会话 |
 | `zip_encrypt` | `switch` | false | 开启后加密 ZIP（AES-256），关闭后直接发 PDF |
 | `custom_password` | `string` | "" | 自定义密码，留空自动随机生成 |
 
@@ -70,6 +71,11 @@
         "type": "switch",
         "default": true,
         "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用"
+    },
+    "allow_cross_session": {
+        "type": "switch",
+        "default": false,
+        "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话"
     },
     "zip_encrypt": {
         "type": "switch",
