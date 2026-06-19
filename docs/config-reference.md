@@ -12,7 +12,6 @@
 | | `zip_encrypt` | `switch` | false | 开启后加密 ZIP（AES-256），关闭后直接发 PDF |
 | | `custom_password` | `string` | "" | 自定义密码，留空自动随机生成 |
 | 缓存 | `max_cache` | `integer` | 10 | 最多缓存几本 PDF |
-| 显示 | `desc_max_length` | `integer` | 80 | 描述截取字符数 |
 | 内容访问 | `content_query` | `switch` | false | 允许搜索和查看本子元信息 |
 | | `block_content_tools` | `switch` | true | content_query 关闭时：true=不注册，false=拦截提示 |
 | 转发控制 | `allow_cross_session` | `switch` | false | 允许转发到其他会话，关闭时 target 只能设为当前会话 |
@@ -61,11 +60,6 @@
         "type": "integer",
         "default": 10,
         "hint": "最多缓存几本 PDF，超限自动删最旧"
-    },
-    "desc_max_length": {
-        "type": "integer",
-        "default": 80,
-        "hint": "描述截取字符数"
     },
     "content_query": {
         "type": "switch",
