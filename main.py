@@ -351,7 +351,6 @@ class JMdownPlugin(BasePlugin):
         self._cache: Optional[CacheIndex] = None
         self._max_cache: int = 10
         self._pdf_quality: int = 85
-        self._desc_max_length: int = 80
         self._upload_timeout: int = 300
         self._chunk_size: int = 512 * 1024
         self._allow_cross_session: bool = False
@@ -371,7 +370,6 @@ class JMdownPlugin(BasePlugin):
         self._cache_dir.mkdir(exist_ok=True)
 
         self._max_cache = int(self.plugin_cfg.get("max_cache", 10))
-        self._desc_max_length = int(self.plugin_cfg.get("desc_max_length", 80))
         self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
         self._download_threads = max(1, int(self.plugin_cfg.get("download_threads", 45)))
         self._upload_timeout = max(1, int(self.plugin_cfg.get("upload_timeout", 300)))
@@ -662,7 +660,7 @@ class JMdownPlugin(BasePlugin):
         return result
 
     def _format_album_info(self, info: dict) -> str:
-        ml = self._desc_max_length
+        ml = 120
         desc = info.get("description", "")
         if len(desc) > ml:
             desc = desc[:ml] + "..."
@@ -714,7 +712,7 @@ class JMdownPlugin(BasePlugin):
         ]
         if s.status == "done" and s.result and self._content_query:
             r = s.result
-            ml = self._desc_max_length
+            ml = 120
             desc = r.get("description", "")
             if len(desc) > ml:
                 desc = desc[:ml] + "..."
@@ -937,7 +935,7 @@ class JMdownPlugin(BasePlugin):
             pwd_hint = "若无用户要求，请务必及时告知用户密码\n" if pwd else ""
             if self._content_query:
                 r = s.result
-                ml = self._desc_max_length
+                ml = 120
                 desc = r.get("description", "")
                 if len(desc) > ml:
                     desc = desc[:ml] + "..."
