@@ -526,6 +526,17 @@ class JMdownPlugin(BasePlugin):
         except JMDownError as e:
             return f"错误: {e}"
 
+        # 预查本子是否存在，10s 超时兜底（网络波动 fallthrough 到后台任务）
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(_fetch_album_meta, album_id),
+                timeout=10,
+            )
+        except JMDownError as e:
+            return f"错误: {e}"
+        except (TimeoutError, Exception):
+            pass
+
         state = TaskState(job_id=job_id, album_id=album_id, target=target)
         self._task_registry[job_id] = state
 
@@ -901,6 +912,10 @@ class JMdownPlugin(BasePlugin):
         self._orphan_aids.discard(aid)
 
     def _cleanup_task(self, state: TaskState):
+        # 只弹自己的 task entry，不误弹被死任务检测覆盖的新任务
+        cur = asyncio.current_task()
+        if cur is not None and self._running_tasks.get(state.album_id) is not cur:
+            return
         self._running_tasks.pop(state.album_id, None)
         # state 留 registry 供 query_jm_task 查询，按 job_id 上限 30 条
         if len(self._task_registry) > 30:
