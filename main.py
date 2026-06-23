@@ -953,16 +953,14 @@ class JMdownPlugin(BasePlugin):
                     f"{extra}"
                     f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
                     f"{pwd_line}"
-                    f"{pwd_hint}"
-                    self._INSTRUCTION_NOTE
+                    f"{pwd_hint}" + self._INSTRUCTION_NOTE
                 )
             return (
                 f"任务 [{s.job_id}] #{s.album_id} 全部完成\n"
                 f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}\n"
                 f"{pwd_line}"
                 f"耗时: {s.elapsed:.0f}s\n"
-                f"{pwd_hint}"
-                self._INSTRUCTION_NOTE
+                f"{pwd_hint}" + self._INSTRUCTION_NOTE
             )
         # failed
         return (
