@@ -122,12 +122,11 @@ class CacheIndexLoadErrorTest(unittest.TestCase):
 
     def test_fifo_eviction(self):
         """超出 max_entries 时淘汰最旧条目"""
+        ci = CacheIndex(self.index_path, max_entries=3)
         for i in range(5):
             entry = CacheEntry(album_id=i, title=f"t{i}", description="",
                                page_count=10, pdf_path=f"/x/{i}.pdf",
                                size_bytes=1000, downloaded_at=float(i))
-            if i == 0:
-                ci = CacheIndex(self.index_path, max_entries=3)
             ci.put(entry)
 
         self.assertEqual(len(ci.list_all()), 3)
@@ -136,12 +135,11 @@ class CacheIndexLoadErrorTest(unittest.TestCase):
 
     def test_put_updates_existing(self):
         """put 同一 album_id 应更新而非重复"""
+        ci = CacheIndex(self.index_path, max_entries=5)
         for i in range(2):
             entry = CacheEntry(album_id=1, title=f"v{i}", description="",
                                page_count=10, pdf_path="/x/1.pdf",
                                size_bytes=1000, downloaded_at=float(i))
-            if i == 0:
-                ci = CacheIndex(self.index_path, max_entries=5)
             ci.put(entry)
 
         self.assertEqual(len(ci.list_all()), 1)
