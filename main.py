@@ -161,8 +161,8 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45,
     opt = jmcomic.JmOption.default()
     opt.dir_rule.base_dir = str(download_dir.resolve())
     # Bd_Aid: 按 album_id 建目录，不依赖标题
+    # 只设 rule_dsl，parser_list 由 setter 自动重建（不要手动覆盖 parser_list）
     opt.dir_rule.rule_dsl = "Bd_Aid"
-    opt.dir_rule.parser_list = opt.dir_rule.get_rule_parser_list("Bd_Aid")
     opt.download.image.suffix = ".jpg"
     opt.download.image.decode = True
     opt.download.threading.image = threads
@@ -202,7 +202,9 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45,
     title = getattr(album_detail, "name", str(album_id))
     description = getattr(album_detail, "description", "")
 
-    image_dir = download_dir / str(album_id)
+    # 用 jmcomic 的 dir_rule 解析实际保存路径，避免硬编码与 jmcomic 行为不一致
+    from_album = getattr(photo_detail, "from_album", album_detail) or album_detail
+    image_dir = Path(opt.dir_rule.decide_image_save_dir(from_album, photo_detail))
     if not image_dir.is_dir():
         raise JMDownError(f"下载目录不存在: {image_dir}")
 
