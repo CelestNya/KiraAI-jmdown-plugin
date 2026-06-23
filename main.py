@@ -361,6 +361,11 @@ class JMdownPlugin(BasePlugin):
         self._running_tasks: dict[int, asyncio.Task] = {}   # album_id → task
         self._orphan_aids: set[int] = set()
 
+    # 所有涉及 job_id 的工具返回值追加此提示，防止 LLM 向用户暴露内部标识
+    _INSTRUCTION_NOTE = (
+        '---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
+    )
+
     async def initialize(self):
         self._data_dir = self.ctx.get_plugin_data_dir() or Path("data/plugin_data/jmdown")
         self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -390,7 +395,7 @@ class JMdownPlugin(BasePlugin):
         self._custom_password = str(self.plugin_cfg.get("custom_password", ""))
         self._max_concurrent = max(1, int(self.plugin_cfg.get("max_concurrent", 2)))
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
-        if not self._cache._load_error:
+        if not getattr(self._cache, "_load_error", True):
             self._clean_orphans()
 
         # content_query=false 时：block_content_tools=true 不注册，false 仅拦截
@@ -514,8 +519,8 @@ class JMdownPlugin(BasePlugin):
                     None,
                 )
                 if existing:
-                    return f"#{album_id} 已在下载队列中，标识码: {existing.job_id}"
-                return f"#{album_id} 已在下载队列中"
+                    return f"#{album_id} 已在下载队列中，标识码: {existing.job_id}\n{self._INSTRUCTION_NOTE}"
+                return f"#{album_id} 已在下载队列中\n{self._INSTRUCTION_NOTE}"
 
         # 生成 Job ID
         self._task_counter += 1
@@ -549,7 +554,7 @@ class JMdownPlugin(BasePlugin):
         self._running_tasks[album_id] = task
 
         logger.info(f"#{album_id} 入队列 → {job_id}")
-        return f"任务已加入队列\n标识码: {job_id}"
+        return f"任务已加入队列\n标识码: {job_id}\n{self._INSTRUCTION_NOTE}"
 
     # ── 工具: 查询任务状态 ──
 
@@ -697,9 +702,7 @@ class JMdownPlugin(BasePlugin):
             lines.append(f"发布: {pub}{'  更新: ' + upd if upd and upd != '0' else ''}")
         if desc:
             lines.append(f"---\n{desc}")
-        lines.append(
-            '---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
-        )
+        lines.append(self._INSTRUCTION_NOTE)
         return "\n".join(lines)
 
     def _format_state(self, s: TaskState) -> str:
@@ -729,9 +732,7 @@ class JMdownPlugin(BasePlugin):
                 lines.append(f"密码: {pwd}")
         if s.status == "failed" and s.error:
             lines.append(f"错误: {s.error}")
-        lines.append(
-            '---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
-        )
+        lines.append(self._INSTRUCTION_NOTE)
         return "\n".join(lines)
 
     # ── 后台任务 ──
@@ -952,18 +953,16 @@ class JMdownPlugin(BasePlugin):
                     f"{extra}"
                     f"页数: {r.get('page_count', 0)}  大小: {self._fmt(r.get('file_size', 0))}  耗时: {s.elapsed:.0f}s\n"
                     f"{pwd_line}"
-                    f"---\n"
                     f"{pwd_hint}"
-                    '注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
+                    self._INSTRUCTION_NOTE
                 )
             return (
                 f"任务 [{s.job_id}] #{s.album_id} 全部完成\n"
                 f"下载: {p['下载']} | 合成: {p['合成']} | 上传: {p['上传']} | 发送: {p['发送']}\n"
                 f"{pwd_line}"
                 f"耗时: {s.elapsed:.0f}s\n"
-                f"---\n"
                 f"{pwd_hint}"
-                '注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
+                self._INSTRUCTION_NOTE
             )
         # failed
         return (
