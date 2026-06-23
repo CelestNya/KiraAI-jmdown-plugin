@@ -14,11 +14,11 @@ import string
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import jmcomic
+from jmcomic.jm_config import JmModuleConfig
 from PIL import Image
 import img2pdf
 
@@ -276,7 +276,6 @@ class _JMDownPctPlugin(jmcomic.jm_plugin.JmOptionPlugin):
             cb(pct, _fmt(speed) + "/s")
 
 _JMDownPctPlugin.plugin_key = "_jmdown_pct"
-from jmcomic.jm_config import JmModuleConfig
 JmModuleConfig.REGISTRY_PLUGIN["_jmdown_pct"] = _JMDownPctPlugin
 
 
