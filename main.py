@@ -161,9 +161,10 @@ def _download_images(album_id: int, download_dir: Path, threads: int = 45,
     opt = jmcomic.JmOption.default()
     opt.dir_rule.base_dir = str(download_dir.resolve())
     # Bd_Aid: 按 album_id 建目录，不依赖标题
-    # 只设 rule_dsl，parser_list 由 setter 自动重建（不要手动覆盖 parser_list）
+    # 设 rule_dsl 后 parser_list 不会自动重建，需手动调用 get_rule_parser_list 更新
     opt.dir_rule.rule_dsl = "Bd_Aid"
     opt.download.image.suffix = ".jpg"
+    opt.dir_rule.parser_list = opt.dir_rule.get_rule_parser_list(opt.dir_rule.rule_dsl)
     opt.download.image.decode = True
     opt.download.threading.image = threads
     opt.client.retry_times = 3
