@@ -1,6 +1,6 @@
 # KiraAI JMComic Downloader 插件 (jmdown)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)  [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](requirements.txt)  [![Version](https://img.shields.io/badge/version-2.9.2-blue)](manifest.json)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)  [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](requirements.txt)  [![Version](https://img.shields.io/badge/version-2.9.3-blue)](manifest.json)
 
 jmdown 是 KiraAI 的插件，用于：下载 禁漫天堂 (JMComic) 本子 → 合成为 PDF → 通过 NapCat Stream 分片上传并发送到 QQ 会话（私聊 / 群聊）。
 
@@ -33,12 +33,14 @@ jmdown 是 KiraAI 的插件，用于：下载 禁漫天堂 (JMComic) 本子 → 
 
 | 阶段 | 说明 |
 |------|------|
-| 提交任务 | LLM 调用 `send_jm_album` 工具，返回 `JOB-YYMMDD-NNN` 标识码 |
+| 提交任务 | LLM 调用 `send_jm_album` 工具，返回内部任务标识码（示例: `JOB-<随机唯一串>`），该标识为代理/后台使用，请勿向终端用户公开 |
 | 下载 | 使用 jmcomic 并发下载图片，按 album_id 建目录，实时百分比 + 速度 |
 | 合成 | 使用 img2pdf + Pillow 合成为 PDF，实时报进度 |
 | 上传 | NapCat Stream API 分片上传（默认 512KB/片）绕过 WS 帧限制 |
 | 发送 | 使用 `upload_private_file` / `upload_group_file` 发送到目标 |
 | 通知 | 完成/失败时发通知到目标会话，可选触发 LLM 自动回复 |
+
+> 说明：为了保证任务标识在并发/测﻿试场景下唯一，插件当前使用不可预测的随机唯一串（URL-safe token）作为 job id 前缀（格式如 `JOB-abcdef12_Gh`）。这些 ID 仅用于内部追踪和工具间通信，插件会在返回值中附加说明性提示，避免 LLM 或机器人把该内部标识直接展示给最终用户。
 
 ## 安装
 
@@ -69,13 +71,13 @@ pip install "jmcomic>=2.7" "Pillow>=11" "img2pdf>=0.6" "pyzipper>=0.4"
 
 工具：`send_jm_album`
 
-将下载任务提交到后台并返回任务标识码。
+将下载任务提交到后台并返回任务标识码（内部使用）。
 
 参数:
   - album_id (integer) — 禁漫本子数字 ID
   - target   (string)  — 目标会话，格式 "adapter:type:id"
     - 示例: `qq:dm:123456`（私聊）、`qq:gm:789012`（群聊）
-返回: 任务标识码 `JOB-YYMMDD-NNN`
+返回: 内部任务标识码，如 `JOB-<随机唯一串>`（注意：该标识供工具/开发者追踪使用，不应作为对终端用户的可读引用）
 
 
 工具：`search_jm_album`
@@ -103,10 +105,10 @@ pip install "jmcomic>=2.7" "Pillow>=11" "img2pdf>=0.6" "pyzipper>=0.4"
 
 工具：`query_jm_task`
 
-查询后台任务进度和状态。
+查询后台任务进度和状态（使用内部 job id 查询）。
 
 参数:
-  - job_id (string) — 任务标识码
+  - job_id (string) — 任务标识码（如插件返回的 `JOB-...`）
 返回: 阶段状态、耗时、结果或错误信息
 
 
@@ -115,7 +117,7 @@ pip install "jmcomic>=2.7" "Pillow>=11" "img2pdf>=0.6" "pyzipper>=0.4"
 ```
 用户：帮我下载本子 421982，发到我 QQ 私聊
 LLM → send_jm_album(album_id=421982, target="qq:dm:2263130787")
-     → "已提交任务 JOB-241215-001"
+     → "任务已加入队列，标识码: JOB-<内部唯一串>（仅供内部追踪）"
 ...后台异步完成后自动发通知到会话...
 ```
 
