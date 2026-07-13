@@ -9,7 +9,6 @@ cache.py             ← FIFO 缓存队列，独立可测试
 napcat_stream.py     ← NapCat Stream API 封装，分片上传、发送
 manifest.json        ← 插件元信息
 schema.json          ← 配置项定义
-test_send.py         ← WS 直连测试脚本
 ```
 
 ## 数据流

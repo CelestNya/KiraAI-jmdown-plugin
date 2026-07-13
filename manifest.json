@@ -4,7 +4,14 @@
     "version": "2.9.3",
     "author": "CelestNya",
     "description": "下载 JMComic 本子并合成为 PDF，包含了完整的后台发送功能",
-    "tags": ["下载", "漫画", "JMComic", "PDF", "QQ"],
     "repo": "https://github.com/CelestNya/KiraAI-jmdown-plugin",
-    "dependencies": ["jmcomic>=2.7", "Pillow>=11", "img2pdf>=0.6", "pyzipper>=0.4"]
+    "core_version": ">=v2.21.0",
+    "tags": ["下载", "漫画", "JMComic", "PDF", "QQ"],
+    "dependencies": ["jmcomic>=2.7", "Pillow>=11", "img2pdf>=0.6", "pyzipper>=0.4"],
+    "locales": {
+        "zh": {
+            "display_name": "JMComic 下载器",
+            "description": "下载 JMComic 本子并合成为 PDF，包含了完整的后台发送功能"
+        }
+    }
 }

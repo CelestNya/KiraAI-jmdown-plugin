@@ -9,7 +9,7 @@ KiraAI tool 响应有约 60s 超时限制。下载 JMComic + 合成 PDF + 上传
 ```python
 @dataclass
 class TaskState:
-    job_id: str          # JOB-YYMMDD-NNN
+    job_id: str          # JOB-<随机串>
     album_id: int        # 本子 ID
     target: str          # 目标会话
     status: str          # running / done / failed
@@ -32,7 +32,7 @@ class TaskState:
 `query_jm_task` 返回示例：
 
 ```
-[完成] JOB-YZMMDD-001
+[完成] JOB-X1a1MVQB0k0
 下载: 已完成 | 合成: 已完成 | 上传: 已完成 | 发送: 已完成
 耗时: 45s
 标题: [Miyako] MY ROOMMATE 2 (EP.6-9)
@@ -45,12 +45,17 @@ class TaskState:
 同一 album_id 正在运行则复用已有任务。超过 `upload_timeout + 120s` 视为死任务，取消旧任务允许重新提交：
 
 ```python
-if task and not task.done():
-    elapsed = time.time() - state.started_at
-    if elapsed > self._upload_timeout + 120:
-        task.cancel()           # 死任务，允许重新提交
+_task = self._running_tasks.get(album_id)
+if _task and not _task.done():
+    # 从 registry 反查运行中 TaskState 的 started_at
+    _state = next((s for s in self._task_registry.values()
+                   if s.album_id == album_id and s.status == "running"), None)
+    _elapsed = time.time() - (_state.started_at if _state else time.time())
+    if _elapsed > self._upload_timeout + 120:
+        _task.cancel()                       # 死任务，允许重新提交
+        self._running_tasks.pop(album_id, None)
     else:
-        return f"#{album_id} 已在下载队列中，标识码: {existing.job_id}"
+        return f"#{album_id} 已在下载队列中，标识码: {_state.job_id}\n{self._INSTRUCTION_NOTE}"
 ```
 
 ## 并发限制
@@ -96,12 +101,23 @@ if cached and Path(cached.pdf_path).exists():
 
 ## 错误处理
 
-所有异常被 `_task_runner` 的 `except Exception` 捕获：
+所有异常被 `_task_runner` 的 `except BaseException` 捕获（含 `CancelledError`，确保取消路径也发通知）：
 
 ```python
-except Exception as e:
+except BaseException as e:
     state.status = "failed"
-    state.error = str(e)
+    state.elapsed = time.time() - state.started_at
+    if isinstance(e, TimeoutError):
+        # 下载/合成/ZIP 超时残留在 executor 的线程，延迟释放 aid
+        self._orphan_aids.add(aid)
+        self._spawn_bg_task(self._release_orphan_after(aid, self._upload_timeout * 3))
+    if isinstance(e, asyncio.CancelledError):
+        state.error = "任务已被取消"
+        await self._send_completion_notice(sid, state)
+        raise  # CancelledError 必须向上传播
+    else:
+        state.error = str(e)
+        logger.error(f"#{aid} 后台任务失败: {e}")
     await self._send_completion_notice(sid, state)
 ```
 
@@ -114,10 +130,16 @@ except Exception as e:
 
 ## 资源清理
 
+`finally` 块依次执行 ZIP 临时文件清理与任务登记清理：
+
 ```python
 def _cleanup_task(self, state: TaskState):
+    # 只弹自己的 task entry，不误弹被死任务检测覆盖的新任务
+    cur = asyncio.current_task()
+    if cur is not None and self._running_tasks.get(state.album_id) is not cur:
+        return
     self._running_tasks.pop(state.album_id, None)
-    # 保留 registry 条目供查询，上限 30 条
+    # state 留 registry 供 query_jm_task 查询，按 job_id 上限 30 条
     if len(self._task_registry) > 30:
         for key in list(self._task_registry)[:-30]:
             self._task_registry.pop(key, None)
@@ -125,4 +147,5 @@ def _cleanup_task(self, state: TaskState):
 
 - `_running_tasks`：`dict[album_id, asyncio.Task]`，运行时集合，任务完成后移除
 - `_task_registry`：`dict[job_id, TaskState]`，历史记录，保留最近 30 条
+- `_cleanup_zip`：`zip_encrypt=true` 时生成的 `{aid}.zip` 是临时打包物（PDF 已单独缓存），任务结束无论成败都删，避免磁盘残留
 - `_cleanup_task` 在 `finally` 块中执行，确保异常路径也能清理
