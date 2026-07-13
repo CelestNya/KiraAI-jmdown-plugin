@@ -18,7 +18,6 @@ pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6
 | `main.py` | 核心逻辑 | `JMdownPlugin`, `_task_runner`, `_download_images`, `_images_to_pdf` |
 | `cache.py` | 缓存模块 | `CacheIndex`, `CacheEntry` |
 | `napcat_stream.py` | 上传封装 | `stream_upload_file`, `send_file_via_stream` |
-| `test_send.py` | WS 直连测试 | `test()` |
 | `__init__.py` | 入口 | 导出 `JMdownPlugin` |
 
 ## 开发注意事项
@@ -35,19 +34,26 @@ opt.dir_rule.parser_list = opt.dir_rule.get_rule_parser_list("Bd_Aid")
 ### 页数校验
 
 ```python
-expected = sum(len(ch) for ch in album_obj)
+expected_stems = {Path(p).stem for p in (photo_detail.page_arr or [])}
+expected = len(expected_stems)
 if expected > 0 and len(images) != expected:
     raise JMDownError(f"页数不匹配: 实际 {len(images)} 张, 预期 {expected} 张")
 ```
 
 - `album.page_count` 可能是 0（API 不保证填充）
-- 正确方式：`sum(len(chapter) for chapter in album_obj)` 遍历章节计算总页数
+- 正确方式：用 `photo_detail.page_arr`（精确文件名列表）的 stem 集合计数
 - `expected > 0` 保护：某些情况下 API 返回不完整，跳过校验
 
 ### Stream Upload Hash
 
 ```python
-full_sha256 = hashlib.sha256(open(file_path, "rb").read()).hexdigest()
+# 分块读取计算 SHA256，避免一次性读入大文件
+def _sha256_file(file_path: str) -> str:
+    h = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
 ```
 
 - `expected_sha256` 必须是完整文件的 hash
@@ -66,14 +72,16 @@ adapter:type:id
 解析时只验证格式合法性，不验证 adapter 是否存在：
 
 ```python
-def _parse_target(target: str) -> tuple:
+def _parse_target(target: str) -> tuple[str, bool, Optional[str]]:
     parts = target.split(":", 2)
     if len(parts) != 3:
-        raise JMDownError("target 格式错误, 应为 adapter:type:id")
-    adapter, typ, sid = parts
-    if typ not in ("dm", "gm"):
-        raise JMDownError("type 须为 dm(私聊) 或 gm(群聊)")
-    return sid, typ == "gm", sid if typ == "gm" else None
+        raise JMDownError(f"目标会话格式错误: {target}, 应为 adapter:type:id")
+    _adapter, stype, sid = parts
+    if stype == "dm":
+        return sid, False, None
+    if stype == "gm":
+        return sid, True, sid
+    raise JMDownError(f"未知会话类型: {stype}, 应为 dm(私聊) 或 gm(群聊)")
 ```
 
 ## 测试
@@ -81,12 +89,9 @@ def _parse_target(target: str) -> tuple:
 ### 手动测试
 
 ```bash
-# 1. 独立 WS 上传测试
-python test_send.py 2263130787
-
-# 2. 在 KiraAI 中测试
+# 在 KiraAI 中测试
 # 发送到 QQ 私聊：send_jm_album(album_id=1248643, target="qq:dm:2263130787")
-# 查询任务状态：query_jm_task(job_id="JOB-YYMMDD-001")
+# 查询任务状态：query_jm_task(job_id="JOB-X1a1MVQB0k0")
 ```
 
 ### 验证清单

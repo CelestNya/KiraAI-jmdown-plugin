@@ -78,20 +78,3 @@ await client.send_action("upload_private_file", {
 3. **timeout 要设够**：大文件上传建议 300s+
 4. **WS 连接复用**：通过 `adapter.get_client()` 获取已有连接，不开新连接
 5. **文件格式**：NapCat 会根据 filename 后缀决定文件类型，保持 `.pdf`
-
-## 测试脚本
-
-`test_send.py` 是独立的 WS 直连测试脚本，不依赖 KiraAI：
-
-```bash
-# 生成 ~50MB 测试 PDF，上传并发送给指定用户
-python test_send.py 2263130787
-```
-
-测试流程：
-1. 读取 KiraAI 系统配置中的 WS 连接信息
-2. 直接连接 NapCat WS
-3. 生成测试 PDF（1500 页彩色图片）
-4. 分片上传 + `is_complete`
-5. 发送到目标用户
-6. 输出每个步骤的响应
