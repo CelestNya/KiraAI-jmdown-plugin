@@ -4,6 +4,7 @@ NapCat Stream API 封装
 大文件分片上传，绕过 WebSocket 16MB 帧限制。
 复用主 WS 连接（通过 adapter.get_client()），不开新连接。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,7 +20,9 @@ from core.plugin import logger
 
 class NapCatConfigError(RuntimeError):
     """NapCat 配置错误（适配器/客户端不可用）"""
+
     pass
+
 
 CHUNK_SIZE = 512 * 1024  # 512KB — 减少 round-trip 次数, NapCat 帧上限 16MB
 
@@ -29,7 +32,9 @@ def _find_qq_adapter(adapter_mgr):
     adapters = adapter_mgr.get_adapters()
     for name, inst in adapters.items():
         if getattr(inst, "info", None) and inst.info.platform.upper() == "QQ":
-            logger.info(f"Found QQ adapter: name={name!r}, platform={inst.info.platform!r}")
+            logger.info(
+                f"Found QQ adapter: name={name!r}, platform={inst.info.platform!r}"
+            )
             return inst
     logger.warning(
         f"QQ adapter not found. Available: "
@@ -57,7 +62,9 @@ async def stream_upload_file(
     total_chunks = (file_size + chunk_size - 1) // chunk_size
     stream_id = f"jmdown_{int(time.time())}_{os.path.basename(file_path)}"
 
-    logger.info(f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})")
+    logger.info(
+        f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})"
+    )
 
     # expected_sha256 必须为完整文件 hash, 所有分片传同一个值
     # 分块读 + 丢线程, 避免一次性读入大文件并阻塞事件循环
@@ -68,7 +75,6 @@ async def stream_upload_file(
 
     with open(file_path, "rb") as f:
         for i in range(total_chunks):
-            chunk_start = time.time()
             chunk = f.read(chunk_size)
             chunk_b64 = base64.b64encode(chunk).decode()
 
@@ -82,7 +88,9 @@ async def stream_upload_file(
                 "filename": os.path.basename(file_path),
             }
 
-            resp = await client.send_action("upload_file_stream", params, timeout=timeout)
+            resp = await client.send_action(
+                "upload_file_stream", params, timeout=timeout
+            )
             status = resp.get("status", "")
             if status != "ok":
                 raise RuntimeError(
@@ -90,23 +98,26 @@ async def stream_upload_file(
                     f"status={status} data={resp.get('data', {})}"
                 )
 
-            # 报告进度
+            # 报告进度（用全程平均速度，单chunk瞬时速度未使用）
             if progress_cb and (
                 i == 0 or i == total_chunks - 1 or i % report_every == 0
             ):
-                chunk_elapsed = time.time() - chunk_start
-                inst_speed = len(chunk) / chunk_elapsed if chunk_elapsed > 0 else 0
                 pct = min(int((i + 1) / total_chunks * 100), 100)
-                avg_speed = (chunk_size * (i + 1)) / (time.time() - t0) if (time.time() - t0) > 0 else 0
-                speed_str = _fmt(avg_speed) + f"/s"
+                elapsed = time.time() - t0
+                avg_speed = (chunk_size * (i + 1)) / elapsed if elapsed > 0 else 0
+                speed_str = _fmt(avg_speed) + "/s"
                 await progress_cb(pct, speed_str)
 
     # ── 所有块发送完成，通知 NapCat 组装文件 ──
     logger.info("All chunks sent, signaling completion ...")
-    complete_resp = await client.send_action("upload_file_stream", {
-        "stream_id": stream_id,
-        "is_complete": True,
-    }, timeout=timeout)
+    complete_resp = await client.send_action(
+        "upload_file_stream",
+        {
+            "stream_id": stream_id,
+            "is_complete": True,
+        },
+        timeout=timeout,
+    )
     status = complete_resp.get("status", "")
     if status != "ok":
         raise RuntimeError(
@@ -150,7 +161,9 @@ async def send_file_via_stream(
     file_name = os.path.basename(file_path)
 
     # 1. 分片上传到 NapCat temp
-    remote_path = await stream_upload_file(client, file_path, timeout, progress_cb, chunk_size)
+    remote_path = await stream_upload_file(
+        client, file_path, timeout, progress_cb, chunk_size
+    )
     file_size = os.path.getsize(file_path)
     logger.info(f"Stream upload OK: {file_name} ({_fmt(file_size)}) → {remote_path}")
 
@@ -192,4 +205,4 @@ def _fmt(b: int) -> str:
         return f"{b} B"
     if b < 1024**2:
         return f"{b / 1024:.1f} KB"
-    return f"{b / 1024 ** 2:.1f} MB"
+    return f"{b / 1024**2:.1f} MB"

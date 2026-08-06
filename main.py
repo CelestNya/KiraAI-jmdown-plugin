@@ -418,34 +418,7 @@ class JMdownPlugin(BasePlugin):
         self._cache_dir = self._data_dir / "cache"
         self._cache_dir.mkdir(exist_ok=True)
 
-        self._max_cache = int(self.plugin_cfg.get("max_cache", 10))
-        self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
-        self._download_threads = max(
-            1, int(self.plugin_cfg.get("download_threads", 45))
-        )
-        self._upload_timeout = max(1, int(self.plugin_cfg.get("upload_timeout", 300)))
-        self._chunk_size = min(
-            16 * 1024 * 1024,  # NapCat WS 帧上限
-            max(4096, int(self.plugin_cfg.get("chunk_size", 512 * 1024))),
-        )
-        self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
-        self._content_query = bool(self.plugin_cfg.get("content_query", False))
-        self._block_content_tools = bool(
-            self.plugin_cfg.get("block_content_tools", True)
-        )
-        self._allow_cross_session = bool(
-            self.plugin_cfg.get("allow_cross_session", False)
-        )
-        self._zip_encrypt = bool(self.plugin_cfg.get("zip_encrypt", False))
-        if self._zip_encrypt:
-            try:
-                import pyzipper  # noqa: F401
-            except ImportError:
-                raise RuntimeError(
-                    "zip_encrypt=True 但 pyzipper 未安装：pip install pyzipper>=0.4"
-                )
-        self._custom_password = str(self.plugin_cfg.get("custom_password", ""))
-        self._max_concurrent = max(1, int(self.plugin_cfg.get("max_concurrent", 2)))
+        self._load_config()
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         if not getattr(self._cache, "_load_error", True):
             self._clean_orphans()
@@ -487,6 +460,56 @@ class JMdownPlugin(BasePlugin):
         logging.getLogger("jmcomic").setLevel(logging.WARNING)
 
         logger.info("JMdown 就绪")
+
+    def _sec(self, key: str) -> dict:
+        """读取 section 分组配置，非 dict 时回退空 dict。
+
+        schema.json 按 section 分组后，核心将子字段嵌套存储
+        （如 {"download": {"download_threads": 45}}），字段不再是平铺结构。
+        """
+        v = self.plugin_cfg.get(key, {})
+        return v if isinstance(v, dict) else {}
+
+    def _load_config(self):
+        """从 plugin_cfg 读取全部配置。
+
+        读取顺序：section 嵌套值 > 旧版平铺值 > 默认值。平铺兜底是为了兼容
+        分组前生成的 jmdown.json——未在 WebUI 重新保存前，其中仍是平铺字段。
+        """
+
+        def _g(section: dict, key: str, default):
+            return section.get(key, self.plugin_cfg.get(key, default))
+
+        dl = self._sec("download")
+        content = self._sec("content")
+        encryption = self._sec("encryption")
+        quality = self._sec("quality")
+        upload = self._sec("upload")
+        cache = self._sec("cache")
+        notification = self._sec("notification")
+
+        self._max_cache = int(_g(cache, "max_cache", 10))
+        self._pdf_quality = int(_g(quality, "pdf_quality", 85))
+        self._download_threads = max(1, int(_g(dl, "download_threads", 45)))
+        self._upload_timeout = max(1, int(_g(upload, "upload_timeout", 300)))
+        self._chunk_size = min(
+            16 * 1024 * 1024,  # NapCat WS 帧上限
+            max(4096, int(_g(upload, "chunk_size", 512 * 1024))),
+        )
+        self._notify_llm = bool(_g(notification, "notify_llm", True))
+        self._content_query = bool(_g(content, "content_query", False))
+        self._block_content_tools = bool(_g(content, "block_content_tools", True))
+        self._allow_cross_session = bool(_g(content, "allow_cross_session", False))
+        self._zip_encrypt = bool(_g(encryption, "zip_encrypt", False))
+        if self._zip_encrypt:
+            try:
+                import pyzipper  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "zip_encrypt=True 但 pyzipper 未安装：pip install pyzipper>=0.4"
+                )
+        self._custom_password = str(_g(encryption, "custom_password", ""))
+        self._max_concurrent = max(1, int(_g(dl, "max_concurrent", 2)))
 
     async def terminate(self):
         tasks = [t for t in self._running_tasks.values() if not t.done()]
