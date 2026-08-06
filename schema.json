@@ -1,110 +1,187 @@
 {
-    "download_threads": {
-        "type": "integer",
-        "name": "下载并行线程数",
-        "default": 45,
-        "hint": "下载图片的并行线程数",
+    "download": {
+        "type": "section",
+        "name": "下载",
+        "hint": "下载相关配置",
+        "collapsed": false,
+        "fields": {
+            "download_threads": {
+                "type": "integer",
+                "name": "下载并行线程数",
+                "default": 45,
+                "hint": "下载图片的并行线程数",
+                "locales": {
+                    "zh": { "name": "下载并行线程数", "hint": "下载图片的并行线程数" }
+                }
+            },
+            "max_concurrent": {
+                "type": "integer",
+                "name": "最大并发任务数",
+                "default": 2,
+                "hint": "同时最多下载任务数，防止大规模批量下载占用资源",
+                "locales": {
+                    "zh": { "name": "最大并发任务数", "hint": "同时最多下载任务数，防止大规模批量下载占用资源" }
+                }
+            }
+        },
         "locales": {
-            "zh": { "name": "下载并行线程数", "hint": "下载图片的并行线程数" }
+            "zh": { "name": "下载", "hint": "下载相关配置" }
         }
     },
-    "max_concurrent": {
-        "type": "integer",
-        "name": "最大并发任务数",
-        "default": 2,
-        "hint": "同时最多下载任务数，防止大规模批量下载占用资源",
+    "content": {
+        "type": "section",
+        "name": "内容审核",
+        "hint": "搜索与元信息查询工具的控制",
+        "collapsed": false,
+        "fields": {
+            "content_query": {
+                "type": "switch",
+                "name": "内容查询",
+                "default": false,
+                "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 受下方开关控制",
+                "locales": {
+                    "zh": { "name": "内容查询", "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 受下方开关控制" }
+                }
+            },
+            "block_content_tools": {
+                "type": "switch",
+                "name": "屏蔽内容工具",
+                "default": true,
+                "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用",
+                "locales": {
+                    "zh": { "name": "屏蔽内容工具", "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用" }
+                }
+            },
+            "allow_cross_session": {
+                "type": "switch",
+                "name": "跨会话转发",
+                "default": false,
+                "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话",
+                "locales": {
+                    "zh": { "name": "跨会话转发", "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话" }
+                }
+            }
+        },
         "locales": {
-            "zh": { "name": "最大并发任务数", "hint": "同时最多下载任务数，防止大规模批量下载占用资源" }
+            "zh": { "name": "内容审核", "hint": "搜索与元信息查询工具的控制" }
         }
     },
-    "content_query": {
-        "type": "switch",
-        "name": "内容查询",
-        "default": false,
-        "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 受下方开关控制",
+    "encryption": {
+        "type": "section",
+        "name": "加密",
+        "hint": "ZIP 加密发送相关配置",
+        "collapsed": false,
+        "fields": {
+            "zip_encrypt": {
+                "type": "switch",
+                "name": "ZIP 加密",
+                "default": false,
+                "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩",
+                "locales": {
+                    "zh": { "name": "ZIP 加密", "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩" }
+                }
+            },
+            "custom_password": {
+                "type": "string",
+                "name": "自定义密码",
+                "default": "",
+                "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）",
+                "locales": {
+                    "zh": { "name": "自定义密码", "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）" }
+                }
+            }
+        },
         "locales": {
-            "zh": { "name": "内容查询", "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 受下方开关控制" }
+            "zh": { "name": "加密", "hint": "ZIP 加密发送相关配置" }
         }
     },
-    "block_content_tools": {
-        "type": "switch",
-        "name": "屏蔽内容工具",
-        "default": true,
-        "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用",
+    "quality": {
+        "type": "section",
+        "name": "质量",
+        "hint": "PDF 合成质量配置",
+        "collapsed": false,
+        "fields": {
+            "pdf_quality": {
+                "type": "integer",
+                "name": "PDF 质量",
+                "default": 85,
+                "hint": "JPEG 质量 (1-100)，越高文件越大画质越好",
+                "locales": {
+                    "zh": { "name": "PDF 质量", "hint": "JPEG 质量 (1-100)，越高文件越大画质越好" }
+                }
+            }
+        },
         "locales": {
-            "zh": { "name": "屏蔽内容工具", "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用" }
+            "zh": { "name": "质量", "hint": "PDF 合成质量配置" }
         }
     },
-    "allow_cross_session": {
-        "type": "switch",
-        "name": "跨会话转发",
-        "default": false,
-        "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话",
+    "upload": {
+        "type": "section",
+        "name": "上传",
+        "hint": "NapCat 分片上传配置",
+        "collapsed": false,
+        "fields": {
+            "upload_timeout": {
+                "type": "integer",
+                "name": "上传超时",
+                "default": 300,
+                "hint": "上传超时秒数（大文件建议 300+）",
+                "locales": {
+                    "zh": { "name": "上传超时", "hint": "上传超时秒数（大文件建议 300+）" }
+                }
+            },
+            "chunk_size": {
+                "type": "integer",
+                "name": "分片大小",
+                "default": 524288,
+                "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB",
+                "locales": {
+                    "zh": { "name": "分片大小", "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB" }
+                }
+            }
+        },
         "locales": {
-            "zh": { "name": "跨会话转发", "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话" }
+            "zh": { "name": "上传", "hint": "NapCat 分片上传配置" }
         }
     },
-    "zip_encrypt": {
-        "type": "switch",
-        "name": "ZIP 加密",
-        "default": false,
-        "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩",
+    "cache": {
+        "type": "section",
+        "name": "缓存",
+        "hint": "PDF 缓存配置",
+        "collapsed": false,
+        "fields": {
+            "max_cache": {
+                "type": "integer",
+                "name": "最大缓存数",
+                "default": 10,
+                "hint": "最多缓存几本 PDF，超限自动删最旧",
+                "locales": {
+                    "zh": { "name": "最大缓存数", "hint": "最多缓存几本 PDF，超限自动删最旧" }
+                }
+            }
+        },
         "locales": {
-            "zh": { "name": "ZIP 加密", "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩" }
+            "zh": { "name": "缓存", "hint": "PDF 缓存配置" }
         }
     },
-    "custom_password": {
-        "type": "string",
-        "name": "自定义密码",
-        "default": "",
-        "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）",
+    "notification": {
+        "type": "section",
+        "name": "通知",
+        "hint": "任务完成通知配置",
+        "collapsed": false,
+        "fields": {
+            "notify_llm": {
+                "type": "switch",
+                "name": "通知 LLM",
+                "default": true,
+                "hint": "任务完成后是否在目标会话触发 LLM 自动回复",
+                "locales": {
+                    "zh": { "name": "通知 LLM", "hint": "任务完成后是否在目标会话触发 LLM 自动回复" }
+                }
+            }
+        },
         "locales": {
-            "zh": { "name": "自定义密码", "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）" }
-        }
-    },
-    "pdf_quality": {
-        "type": "integer",
-        "name": "PDF 质量",
-        "default": 85,
-        "hint": "JPEG 质量 (1-100)，越高文件越大画质越好",
-        "locales": {
-            "zh": { "name": "PDF 质量", "hint": "JPEG 质量 (1-100)，越高文件越大画质越好" }
-        }
-    },
-    "upload_timeout": {
-        "type": "integer",
-        "name": "上传超时",
-        "default": 300,
-        "hint": "上传超时秒数（大文件建议 300+）",
-        "locales": {
-            "zh": { "name": "上传超时", "hint": "上传超时秒数（大文件建议 300+）" }
-        }
-    },
-    "chunk_size": {
-        "type": "integer",
-        "name": "分片大小",
-        "default": 524288,
-        "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB",
-        "locales": {
-            "zh": { "name": "分片大小", "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB" }
-        }
-    },
-    "max_cache": {
-        "type": "integer",
-        "name": "最大缓存数",
-        "default": 10,
-        "hint": "最多缓存几本 PDF，超限自动删最旧",
-        "locales": {
-            "zh": { "name": "最大缓存数", "hint": "最多缓存几本 PDF，超限自动删最旧" }
-        }
-    },
-    "notify_llm": {
-        "type": "switch",
-        "name": "通知 LLM",
-        "default": true,
-        "hint": "任务完成后是否在目标会话触发 LLM 自动回复",
-        "locales": {
-            "zh": { "name": "通知 LLM", "hint": "任务完成后是否在目标会话触发 LLM 自动回复" }
+            "zh": { "name": "通知", "hint": "任务完成通知配置" }
         }
     }
 }

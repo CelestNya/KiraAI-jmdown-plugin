@@ -356,5 +356,106 @@ class CleanupTaskTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(len(p._task_registry), 30)
 
 
+class ConfigLoadTest(unittest.TestCase):
+    """C1: _load_config 读取 section 分组配置，并兼容旧版平铺结构。"""
+
+    def test_section_nested(self):
+        p = JMdownPlugin(
+            MagicMock(),
+            {
+                "download": {"download_threads": 30, "max_concurrent": 3},
+                "content": {
+                    "content_query": True,
+                    "block_content_tools": False,
+                    "allow_cross_session": True,
+                },
+                "encryption": {"zip_encrypt": False, "custom_password": "pw"},
+                "quality": {"pdf_quality": 70},
+                "upload": {"upload_timeout": 600, "chunk_size": 1024 * 1024},
+                "cache": {"max_cache": 5},
+                "notification": {"notify_llm": False},
+            },
+        )
+        p._load_config()
+        self.assertEqual(p._download_threads, 30)
+        self.assertEqual(p._max_concurrent, 3)
+        self.assertTrue(p._content_query)
+        self.assertFalse(p._block_content_tools)
+        self.assertTrue(p._allow_cross_session)
+        self.assertEqual(p._custom_password, "pw")
+        self.assertEqual(p._pdf_quality, 70)
+        self.assertEqual(p._upload_timeout, 600)
+        self.assertEqual(p._chunk_size, 1024 * 1024)
+        self.assertEqual(p._max_cache, 5)
+        self.assertFalse(p._notify_llm)
+
+    def test_flat_legacy_fallback(self):
+        """旧版平铺配置（<2.10.0 生成的 jmdown.json）仍可读取。"""
+        p = JMdownPlugin(
+            MagicMock(),
+            {
+                "download_threads": 30,
+                "max_concurrent": 3,
+                "content_query": True,
+                "allow_cross_session": True,
+            },
+        )
+        p._load_config()
+        self.assertEqual(p._download_threads, 30)
+        self.assertEqual(p._max_concurrent, 3)
+        self.assertTrue(p._content_query)
+        self.assertTrue(p._allow_cross_session)
+        self.assertEqual(p._max_cache, 10)  # 未提供 → 默认
+
+    def test_section_precedence_over_flat(self):
+        p = JMdownPlugin(
+            MagicMock(),
+            {"download": {"download_threads": 60}, "download_threads": 30},
+        )
+        p._load_config()
+        self.assertEqual(p._download_threads, 60)
+
+    def test_section_not_dict_falls_back(self):
+        p = JMdownPlugin(MagicMock(), {"download": "oops", "download_threads": 30})
+        p._load_config()
+        self.assertEqual(p._download_threads, 30)
+
+    def test_defaults_when_empty(self):
+        p = JMdownPlugin(MagicMock(), {})
+        p._load_config()
+        self.assertEqual(p._download_threads, 45)
+        self.assertEqual(p._max_concurrent, 2)
+        self.assertFalse(p._content_query)
+        self.assertTrue(p._block_content_tools)
+        self.assertFalse(p._allow_cross_session)
+        self.assertFalse(p._zip_encrypt)
+        self.assertEqual(p._custom_password, "")
+        self.assertEqual(p._pdf_quality, 85)
+        self.assertEqual(p._upload_timeout, 300)
+        self.assertEqual(p._chunk_size, 512 * 1024)
+        self.assertEqual(p._max_cache, 10)
+        self.assertTrue(p._notify_llm)
+
+    def test_clamping(self):
+        p = JMdownPlugin(
+            MagicMock(),
+            {
+                "download": {"download_threads": 0, "max_concurrent": 0},
+                "upload": {"upload_timeout": 0, "chunk_size": 1},
+            },
+        )
+        p._load_config()
+        self.assertEqual(p._download_threads, 1)
+        self.assertEqual(p._max_concurrent, 1)
+        self.assertEqual(p._upload_timeout, 1)
+        self.assertEqual(p._chunk_size, 4096)
+
+    def test_zip_encrypt_requires_pyzipper(self):
+        p = JMdownPlugin(MagicMock(), {"encryption": {"zip_encrypt": True}})
+        with patch("builtins.__import__", side_effect=ImportError):
+            with self.assertRaises(RuntimeError):
+                p._load_config()
+
+
 if __name__ == "__main__":
     unittest.main()
