@@ -1038,10 +1038,11 @@ class JMdownPlugin(BasePlugin):
         except BaseException as e:
             state.status = "failed"
             state.elapsed = time.time() - state.started_at
-            # 追踪 TimeoutError（下载/合成/ZIP 超时）残留在 executor 里的 orphan 线程
-            # 当 _elapsed > self._upload_timeout * 3 时视为线程已耗尽，可以被覆盖
-            # 但短时间内的超时仍可能冲突，延迟释放
-            if isinstance(e, TimeoutError):
+            # 追踪残留在 executor 里的 orphan 线程（jmcomic 同步下载线程无法被
+            # cancel）。TimeoutError（下载/合成/ZIP 超时）与 CancelledError
+            # （reload/terminate 取消）都会留下线程继续写 downloads/<aid>，
+            # 若立即删除目录会 WinError 145（目录非空），登记后延迟释放。
+            if isinstance(e, (TimeoutError, asyncio.CancelledError)):
                 self._orphan_aids.add(aid)
                 self._spawn_bg_task(
                     self._release_orphan_after(aid, self._upload_timeout * 3)
@@ -1084,6 +1085,15 @@ class JMdownPlugin(BasePlugin):
     async def _release_orphan_after(self, aid: int, delay: int):
         await asyncio.sleep(delay)
         self._orphan_aids.discard(aid)
+        # 此时 orphan 线程应已耗尽，补清残留下载目录（超时/取消路径
+        # _task_runner 来不及 _rmtree 的目录）
+        if self._download_dir is not None:
+            d = self._download_dir / str(aid)
+            if d.exists():
+                try:
+                    _rmtree(d)
+                except OSError:
+                    logger.warning(f"释放 orphan 后清理失败: {d.name}")
 
     def _cleanup_task(self, state: TaskState):
         # 只弹自己的 task entry，不误弹被死任务检测覆盖的新任务
@@ -1160,16 +1170,30 @@ class JMdownPlugin(BasePlugin):
     def _clean_orphans(self):
         known = {e.album_id for e in self._cache.list_all()}
         for f in self._cache_dir.iterdir():
-            if f.suffix == ".pdf" and f.stem.isdigit() and int(f.stem) not in known:
-                f.unlink()
-                logger.info(f"清理孤儿: {f.name}")
-            if f.suffix == ".zip" and f.stem.isdigit() and int(f.stem) not in known:
-                f.unlink()
-                logger.info(f"清理孤立 ZIP: {f.name}")
+            try:
+                if f.suffix == ".pdf" and f.stem.isdigit() and int(f.stem) not in known:
+                    f.unlink()
+                    logger.info(f"清理孤儿: {f.name}")
+                if f.suffix == ".zip" and f.stem.isdigit() and int(f.stem) not in known:
+                    f.unlink()
+                    logger.info(f"清理孤立 ZIP: {f.name}")
+            except OSError:
+                # 文件被占用（如缓存刚被其他实例读取）时跳过，不阻断插件加载
+                logger.warning(f"清理孤儿失败（文件被占用）: {f.name}")
         for d in self._download_dir.iterdir():
-            if d.is_dir() and d.name.isdigit() and int(d.name) not in known:
-                _rmtree(d)
-                logger.info(f"清理孤儿: {d.name}")
+            if (
+                d.is_dir()
+                and d.name.isdigit()
+                and int(d.name) not in known
+                and int(d.name) not in self._orphan_aids
+            ):
+                try:
+                    _rmtree(d)
+                    logger.info(f"清理孤儿: {d.name}")
+                except OSError:
+                    # orphan 线程仍在写入时 rmdir 会 WinError 145；跳过，
+                    # 等 _release_orphan_after 延迟释放后再清
+                    logger.warning(f"清理孤儿目录失败（可能仍被占用）: {d.name}")
 
     @staticmethod
     def _fmt(b: int) -> str:

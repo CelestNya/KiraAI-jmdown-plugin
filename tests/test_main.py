@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import types
+import tempfile
+import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from typing import Any
@@ -110,6 +112,8 @@ def make_plugin() -> JMdownPlugin:
     p._max_concurrent = 2
     p._upload_timeout = 300
     p._allow_cross_session = False
+    p._download_threads = 45
+    p._notify_llm = True
     return p
 
 
@@ -455,6 +459,98 @@ class ConfigLoadTest(unittest.TestCase):
         with patch("builtins.__import__", side_effect=ImportError):
             with self.assertRaises(RuntimeError):
                 p._load_config()
+
+
+class OrphanCleanupTest(unittest.IsolatedAsyncioTestCase):
+    """D1: reload/terminate 取消任务时，jmcomic 同步线程无法被 cancel（orphan）。
+
+    取消路径必须登记 orphan 延迟释放；清理必须容错，否则 initialize 会因
+    WinError 145（目录非空，线程仍在写入）崩溃导致插件加载失败。
+    """
+
+    async def test_cancel_registers_orphan(self):
+        p = make_plugin()
+        p._cache = MagicMock()
+        p._cache.get.return_value = None
+        p._cache_dir = None
+        p._download_dir = None
+        p.ctx.publish_notice = AsyncMock()
+        state = TaskState(job_id="JOB-x", album_id=42, target="qq:dm:1")
+        started = threading.Event()
+        release = threading.Event()
+
+        def hanging_dl(*args, **kwargs):
+            started.set()
+            release.wait(10)
+
+        with patch("jmdown.main._download_images", side_effect=hanging_dl):
+            t = asyncio.create_task(p._task_runner(state))
+            # 轮询等待下载线程启动——不能同步阻塞事件循环（会饿死 _task_runner）
+            for _ in range(500):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(started.is_set())
+            t.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await t
+            release.set()
+        self.assertIn(42, p._orphan_aids)
+        # 清理测试内遗留的延迟释放 bg task，避免泄漏
+        bg = list(p._bg_tasks)
+        for b in bg:
+            b.cancel()
+        await asyncio.gather(*bg, return_exceptions=True)
+
+    async def test_release_orphan_cleans_download_dir(self):
+        """延迟释放到期后，残留的下载目录应被清理。"""
+        p = make_plugin()
+        with tempfile.TemporaryDirectory() as d:
+            dl = Path(d) / "downloads"
+            dl.mkdir()
+            (dl / "42").mkdir()
+            (dl / "42" / "a.jpg").write_bytes(b"x")
+            p._download_dir = dl
+            p._cache_dir = Path(d)
+            p._orphan_aids.add(42)
+            await p._release_orphan_after(42, 0)
+            self.assertNotIn(42, p._orphan_aids)
+            self.assertFalse((dl / "42").exists())
+
+    def test_clean_orphans_tolerates_failure(self):
+        """目录删除失败（WinError 145，线程仍占用）不应使 initialize 崩溃。"""
+        p = make_plugin()
+        with tempfile.TemporaryDirectory() as d:
+            cache_dir = Path(d) / "cache"
+            cache_dir.mkdir()
+            dl = Path(d) / "downloads"
+            dl.mkdir()
+            (dl / "424022").mkdir()
+            p._cache_dir = cache_dir
+            p._download_dir = dl
+            p._cache = MagicMock()
+            p._cache.list_all.return_value = []
+            with patch(
+                "jmdown.main._rmtree", side_effect=OSError(145, "目录不是空的")
+            ):
+                p._clean_orphans()  # 不应抛
+
+    def test_clean_orphans_skips_orphan_aid_dirs(self):
+        """_orphan_aids 中的目录应跳过，等待延迟释放后清理。"""
+        p = make_plugin()
+        with tempfile.TemporaryDirectory() as d:
+            dl = Path(d) / "downloads"
+            dl.mkdir()
+            (dl / "42").mkdir()
+            (dl / "43").mkdir()
+            p._download_dir = dl
+            p._cache_dir = Path(d)
+            p._cache = MagicMock()
+            p._cache.list_all.return_value = []
+            p._orphan_aids.add(42)
+            p._clean_orphans()
+            self.assertTrue((dl / "42").exists())  # orphan 跳过
+            self.assertFalse((dl / "43").exists())  # 非 orphan 仍清理
 
 
 if __name__ == "__main__":
