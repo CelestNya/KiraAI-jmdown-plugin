@@ -104,6 +104,7 @@ from jmdown.main import (  # noqa: E402
     _generate_password,
     _parse_target,
 )
+from jmdown.cache import CacheEntry  # noqa: E402
 
 
 def make_plugin() -> JMdownPlugin:
@@ -551,6 +552,72 @@ class OrphanCleanupTest(unittest.IsolatedAsyncioTestCase):
             p._clean_orphans()
             self.assertTrue((dl / "42").exists())  # orphan 跳过
             self.assertFalse((dl / "43").exists())  # 非 orphan 仍清理
+
+
+class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
+    """E2: 上传 watchdog 与发送阶段超时。"""
+
+    async def test_watchdog_keeps_original_timeout_message(self):
+        """send_action 的超时信息（含 action 名）不应被"上传超时, 已取消"吞掉。"""
+        p = make_plugin()
+
+        async def slow():
+            raise TimeoutError("请求 upload_private_file 超时")
+
+        with self.assertRaises(TimeoutError) as cm:
+            await p._upload_with_watchdog(slow(), 60)
+        self.assertIn("upload_private_file", str(cm.exception))
+
+    async def test_task_runner_cache_hit_passes_send_timeout(self):
+        """缓存命中路径调用 send_file_via_stream 时必须传 send_timeout。"""
+        p = make_plugin()
+        p.ctx.publish_notice = AsyncMock()
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            dl = Path(d) / "downloads"
+            dl.mkdir()
+            cache_dir = Path(d) / "cache"
+            cache_dir.mkdir()
+            pdf = cache_dir / "7.pdf"
+            pdf.write_bytes(b"%PDF-fake")
+            p._download_dir = dl
+            p._cache_dir = cache_dir
+            entry = CacheEntry(
+                album_id=7,
+                title="T",
+                description="",
+                page_count=1,
+                pdf_path=str(pdf),
+                size_bytes=10,
+                downloaded_at=time.time(),
+            )
+            p._cache = MagicMock()
+            p._cache.get.return_value = entry
+            p._content_query = False
+            p._zip_encrypt = False
+            p._chunk_size = 512 * 1024
+
+            captured: dict = {}
+
+            async def fake_send(ctx, sid, user_id, file_path, is_group, group_id, timeout, progress_cb, chunk_size, send_timeout):
+                captured.update(
+                    {
+                        "timeout": timeout,
+                        "send_timeout": send_timeout,
+                        "file_path": file_path,
+                    }
+                )
+                return "ok"
+
+            # main.py 在函数内 `from .napcat_stream import ...`，patch 模块属性
+            with patch("jmdown.napcat_stream.send_file_via_stream", new=fake_send):
+                state = TaskState(job_id="JOB-c", album_id=7, target="qq:dm:1")
+                await p._task_runner(state)
+
+            self.assertEqual(captured["timeout"], max(10, p._upload_timeout // 10))
+            self.assertEqual(captured["send_timeout"], p._upload_timeout + 120)
+            self.assertEqual(state.status, "done")
 
 
 if __name__ == "__main__":
