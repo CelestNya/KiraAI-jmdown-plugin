@@ -530,8 +530,10 @@ class JMdownPlugin(BasePlugin):
         """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。"""
         try:
             return await asyncio.wait_for(upload_coro, timeout=timeout)
-        except TimeoutError:
-            raise TimeoutError("上传超时, 已取消")
+        except TimeoutError as e:
+            # 保留 send_action 的原始超时信息（含 API 名），便于区分
+            # 分片上传超时与发送阶段超时
+            raise TimeoutError(f"上传超时: {e}") from e
 
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
         """通过会话发送进度通知。mentioned=True 会触发目标会话 LLM 回复。"""
@@ -903,6 +905,7 @@ class JMdownPlugin(BasePlugin):
                         _chunk_to,
                         progress_cb=_cache_upload_progress,
                         chunk_size=self._chunk_size,
+                        send_timeout=_ul_to,
                     ),
                     timeout=_ul_to,
                 )
@@ -1011,6 +1014,7 @@ class JMdownPlugin(BasePlugin):
                     _chunk_to,
                     progress_cb=_upload_progress,
                     chunk_size=self._chunk_size,
+                    send_timeout=_ul_timeout,
                 ),
                 timeout=_ul_timeout,
             )

@@ -52,6 +52,7 @@ from napcat_stream import (  # noqa: E402
     _find_qq_adapter,
     _fmt,
     _sha256_file,
+    send_file_via_stream,
     stream_upload_file,
 )
 
@@ -157,6 +158,74 @@ class StreamUploadTest(unittest.IsolatedAsyncioTestCase):
             client.send_action = fake_send
             with self.assertRaises(RuntimeError):
                 await stream_upload_file(client, str(fp), chunk_size=16)
+
+
+class SendFileViaStreamTest(unittest.IsolatedAsyncioTestCase):
+    """E1: 发送阶段（upload_private_file/group_file）必须用独立 send_timeout。
+
+    分片上传每块小（512KB）30s 足够；NapCat 处理大文件发送（从 temp 转存
+    到 QQ 服务器）可能远超 30s，若沿用分片超时会把已成功的发送误判为失败。
+    """
+
+    async def _run(self, *, is_group: bool = False) -> list[tuple[str, dict, float]]:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            fp = Path(d) / "t.bin"
+            fp.write_bytes(b"x" * 32)
+            calls: list[tuple[str, dict, float]] = []
+
+            async def fake_send(action, params, timeout=10):
+                calls.append((action, params, timeout))
+                if params.get("is_complete"):
+                    return {"status": "ok", "data": {"file_path": "/remote/t.bin"}}
+                return {"status": "ok", "data": {}}
+
+            client = MagicMock()
+            client.send_action = fake_send
+            adapter = MagicMock()
+            adapter.info.platform = "QQ"
+            adapter.get_client.return_value = client
+            ctx = MagicMock()
+            ctx.adapter_mgr.get_adapters.return_value = {"qq": adapter}
+
+            if is_group:
+                await send_file_via_stream(
+                    ctx,
+                    "qq:gm:999",
+                    "123",
+                    str(fp),
+                    is_group=True,
+                    group_id="999",
+                    timeout=30,
+                    send_timeout=420,
+                    chunk_size=16,
+                )
+            else:
+                await send_file_via_stream(
+                    ctx,
+                    "qq:dm:123",
+                    "123",
+                    str(fp),
+                    timeout=30,
+                    send_timeout=420,
+                    chunk_size=16,
+                )
+            return calls
+
+    async def test_private_send_uses_send_timeout(self):
+        calls = await self._run()
+        for action, _, t in calls:
+            if action == "upload_private_file":
+                self.assertEqual(t, 420)
+            elif action == "upload_file_stream":
+                self.assertEqual(t, 30)
+
+    async def test_group_send_uses_send_timeout(self):
+        calls = await self._run(is_group=True)
+        for action, _, t in calls:
+            if action == "upload_group_file":
+                self.assertEqual(t, 420)
 
 
 if __name__ == "__main__":

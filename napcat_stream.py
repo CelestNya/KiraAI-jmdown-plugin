@@ -142,6 +142,7 @@ async def send_file_via_stream(
     is_group: bool = False,
     group_id: Optional[str] = None,
     timeout: int = 300,
+    send_timeout: Optional[int] = None,
     progress_cb=None,
     chunk_size: int = 512 * 1024,
 ) -> str:
@@ -150,6 +151,10 @@ async def send_file_via_stream(
     返回人类可读的结果文本。
     progress_cb: async callable(pct: int) for upload progress.
     chunk_size: 分片大小, 默认 512KB.
+    timeout: 单个分片 send_action 超时（每片 512KB，秒级即可完成）.
+    send_timeout: 发送 API（upload_private_file/upload_group_file）超时。
+        NapCat 处理大文件发送（temp 转存 → QQ 服务器）可能远超分片超时，
+        若沿用 timeout 会把已成功的发送误判为超时。默认取 timeout 值。
     """
     # 动态查找 platform=QQ 的 adapter，不硬编码注册名
     adapter = _find_qq_adapter(ctx.adapter_mgr)
@@ -167,18 +172,20 @@ async def send_file_via_stream(
     file_size = os.path.getsize(file_path)
     logger.info(f"Stream upload OK: {file_name} ({_fmt(file_size)}) → {remote_path}")
 
-    # 2. 从 NapCat temp 发给目标用户
+    # 2. 从 NapCat temp 发给目标用户（发送 API 用独立的 send_timeout，
+    #    避免大文件发送处理超时被误判为失败）
+    send_to = send_timeout if send_timeout is not None else timeout
     if is_group and group_id:
         resp = await client.send_action(
             "upload_group_file",
             {"group_id": group_id, "file": remote_path, "name": file_name},
-            timeout=timeout,
+            timeout=send_to,
         )
     else:
         resp = await client.send_action(
             "upload_private_file",
             {"user_id": user_id, "file": remote_path, "name": file_name},
-            timeout=timeout,
+            timeout=send_to,
         )
 
     status = resp.get("status", "")
