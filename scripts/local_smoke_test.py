@@ -20,7 +20,6 @@ import sys
 import tempfile
 import types
 from pathlib import Path
-from typing import Any, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -34,7 +33,6 @@ _pkg.__path__ = [str(ROOT)]
 sys.modules["jmdown"] = _pkg
 
 # 运行于 KiraAI-src 环境：真实 core + 真实 jmcomic
-from core.plugin import BasePlugin  # noqa: E402
 from jmdown.main import JMdownPlugin  # noqa: E402
 
 PASS = 0
