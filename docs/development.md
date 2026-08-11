@@ -86,6 +86,20 @@ def _parse_target(target: str) -> tuple[str, bool, Optional[str]]:
 
 ## 测试
 
+### 单元测试
+
+测试在 `KiraAI-src` 的 uv 环境下运行（提供 jmcomic/PIL/img2pdf 等依赖）。`test_main.py` 通过 `sys.modules` 注入 `core` 框架桩，无需完整 KiraAI 运行时即可测插件逻辑。
+
+```bash
+# pytest（tests/pytest.ini 已配 rootdir 与 import-mode）
+cd ../KiraAI-src && uv run python -m pytest ../KiraAI-jmdown-plugin/tests -v
+
+# 或 unittest discover
+cd ../KiraAI-src && uv run python -m unittest discover -s ../KiraAI-jmdown-plugin/tests -v
+```
+
+覆盖范围：`cache.py` FIFO/加载容错、`main.py` 输入校验/去重/并发/跨会话/死任务/ZIP 清理/后台 task 生命周期、`napcat_stream.py` 分片上传链路/SHA256/适配器查找。
+
 ### 手动测试
 
 ```bash

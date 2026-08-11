@@ -418,34 +418,7 @@ class JMdownPlugin(BasePlugin):
         self._cache_dir = self._data_dir / "cache"
         self._cache_dir.mkdir(exist_ok=True)
 
-        self._max_cache = int(self.plugin_cfg.get("max_cache", 10))
-        self._pdf_quality = int(self.plugin_cfg.get("pdf_quality", 85))
-        self._download_threads = max(
-            1, int(self.plugin_cfg.get("download_threads", 45))
-        )
-        self._upload_timeout = max(1, int(self.plugin_cfg.get("upload_timeout", 300)))
-        self._chunk_size = min(
-            16 * 1024 * 1024,  # NapCat WS 帧上限
-            max(4096, int(self.plugin_cfg.get("chunk_size", 512 * 1024))),
-        )
-        self._notify_llm = bool(self.plugin_cfg.get("notify_llm", True))
-        self._content_query = bool(self.plugin_cfg.get("content_query", False))
-        self._block_content_tools = bool(
-            self.plugin_cfg.get("block_content_tools", True)
-        )
-        self._allow_cross_session = bool(
-            self.plugin_cfg.get("allow_cross_session", False)
-        )
-        self._zip_encrypt = bool(self.plugin_cfg.get("zip_encrypt", False))
-        if self._zip_encrypt:
-            try:
-                import pyzipper  # noqa: F401
-            except ImportError:
-                raise RuntimeError(
-                    "zip_encrypt=True 但 pyzipper 未安装：pip install pyzipper>=0.4"
-                )
-        self._custom_password = str(self.plugin_cfg.get("custom_password", ""))
-        self._max_concurrent = max(1, int(self.plugin_cfg.get("max_concurrent", 2)))
+        self._load_config()
         self._cache = CacheIndex(self._data_dir / "cache_index.json", self._max_cache)
         if not getattr(self._cache, "_load_error", True):
             self._clean_orphans()
@@ -488,6 +461,56 @@ class JMdownPlugin(BasePlugin):
 
         logger.info("JMdown 就绪")
 
+    def _sec(self, key: str) -> dict:
+        """读取 section 分组配置，非 dict 时回退空 dict。
+
+        schema.json 按 section 分组后，核心将子字段嵌套存储
+        （如 {"download": {"download_threads": 45}}），字段不再是平铺结构。
+        """
+        v = self.plugin_cfg.get(key, {})
+        return v if isinstance(v, dict) else {}
+
+    def _load_config(self):
+        """从 plugin_cfg 读取全部配置。
+
+        读取顺序：section 嵌套值 > 旧版平铺值 > 默认值。平铺兜底是为了兼容
+        分组前生成的 jmdown.json——未在 WebUI 重新保存前，其中仍是平铺字段。
+        """
+
+        def _g(section: dict, key: str, default):
+            return section.get(key, self.plugin_cfg.get(key, default))
+
+        dl = self._sec("download")
+        content = self._sec("content")
+        encryption = self._sec("encryption")
+        quality = self._sec("quality")
+        upload = self._sec("upload")
+        cache = self._sec("cache")
+        notification = self._sec("notification")
+
+        self._max_cache = int(_g(cache, "max_cache", 10))
+        self._pdf_quality = int(_g(quality, "pdf_quality", 85))
+        self._download_threads = max(1, int(_g(dl, "download_threads", 45)))
+        self._upload_timeout = max(1, int(_g(upload, "upload_timeout", 300)))
+        self._chunk_size = min(
+            16 * 1024 * 1024,  # NapCat WS 帧上限
+            max(4096, int(_g(upload, "chunk_size", 512 * 1024))),
+        )
+        self._notify_llm = bool(_g(notification, "notify_llm", True))
+        self._content_query = bool(_g(content, "content_query", False))
+        self._block_content_tools = bool(_g(content, "block_content_tools", True))
+        self._allow_cross_session = bool(_g(content, "allow_cross_session", False))
+        self._zip_encrypt = bool(_g(encryption, "zip_encrypt", False))
+        if self._zip_encrypt:
+            try:
+                import pyzipper  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "zip_encrypt=True 但 pyzipper 未安装：pip install pyzipper>=0.4"
+                )
+        self._custom_password = str(_g(encryption, "custom_password", ""))
+        self._max_concurrent = max(1, int(_g(dl, "max_concurrent", 2)))
+
     async def terminate(self):
         tasks = [t for t in self._running_tasks.values() if not t.done()]
         for task in tasks:
@@ -507,8 +530,10 @@ class JMdownPlugin(BasePlugin):
         """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。"""
         try:
             return await asyncio.wait_for(upload_coro, timeout=timeout)
-        except TimeoutError:
-            raise TimeoutError("上传超时, 已取消")
+        except TimeoutError as e:
+            # 保留 send_action 的原始超时信息（含 API 名），便于区分
+            # 分片上传超时与发送阶段超时
+            raise TimeoutError(f"上传超时: {e}") from e
 
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
         """通过会话发送进度通知。mentioned=True 会触发目标会话 LLM 回复。"""
@@ -880,6 +905,7 @@ class JMdownPlugin(BasePlugin):
                         _chunk_to,
                         progress_cb=_cache_upload_progress,
                         chunk_size=self._chunk_size,
+                        send_timeout=_ul_to,
                     ),
                     timeout=_ul_to,
                 )
@@ -988,6 +1014,7 @@ class JMdownPlugin(BasePlugin):
                     _chunk_to,
                     progress_cb=_upload_progress,
                     chunk_size=self._chunk_size,
+                    send_timeout=_ul_timeout,
                 ),
                 timeout=_ul_timeout,
             )
@@ -1015,10 +1042,11 @@ class JMdownPlugin(BasePlugin):
         except BaseException as e:
             state.status = "failed"
             state.elapsed = time.time() - state.started_at
-            # 追踪 TimeoutError（下载/合成/ZIP 超时）残留在 executor 里的 orphan 线程
-            # 当 _elapsed > self._upload_timeout * 3 时视为线程已耗尽，可以被覆盖
-            # 但短时间内的超时仍可能冲突，延迟释放
-            if isinstance(e, TimeoutError):
+            # 追踪残留在 executor 里的 orphan 线程（jmcomic 同步下载线程无法被
+            # cancel）。TimeoutError（下载/合成/ZIP 超时）与 CancelledError
+            # （reload/terminate 取消）都会留下线程继续写 downloads/<aid>，
+            # 若立即删除目录会 WinError 145（目录非空），登记后延迟释放。
+            if isinstance(e, (TimeoutError, asyncio.CancelledError)):
                 self._orphan_aids.add(aid)
                 self._spawn_bg_task(
                     self._release_orphan_after(aid, self._upload_timeout * 3)
@@ -1061,6 +1089,15 @@ class JMdownPlugin(BasePlugin):
     async def _release_orphan_after(self, aid: int, delay: int):
         await asyncio.sleep(delay)
         self._orphan_aids.discard(aid)
+        # 此时 orphan 线程应已耗尽，补清残留下载目录（超时/取消路径
+        # _task_runner 来不及 _rmtree 的目录）
+        if self._download_dir is not None:
+            d = self._download_dir / str(aid)
+            if d.exists():
+                try:
+                    _rmtree(d)
+                except OSError:
+                    logger.warning(f"释放 orphan 后清理失败: {d.name}")
 
     def _cleanup_task(self, state: TaskState):
         # 只弹自己的 task entry，不误弹被死任务检测覆盖的新任务
@@ -1137,16 +1174,30 @@ class JMdownPlugin(BasePlugin):
     def _clean_orphans(self):
         known = {e.album_id for e in self._cache.list_all()}
         for f in self._cache_dir.iterdir():
-            if f.suffix == ".pdf" and f.stem.isdigit() and int(f.stem) not in known:
-                f.unlink()
-                logger.info(f"清理孤儿: {f.name}")
-            if f.suffix == ".zip" and f.stem.isdigit() and int(f.stem) not in known:
-                f.unlink()
-                logger.info(f"清理孤立 ZIP: {f.name}")
+            try:
+                if f.suffix == ".pdf" and f.stem.isdigit() and int(f.stem) not in known:
+                    f.unlink()
+                    logger.info(f"清理孤儿: {f.name}")
+                if f.suffix == ".zip" and f.stem.isdigit() and int(f.stem) not in known:
+                    f.unlink()
+                    logger.info(f"清理孤立 ZIP: {f.name}")
+            except OSError:
+                # 文件被占用（如缓存刚被其他实例读取）时跳过，不阻断插件加载
+                logger.warning(f"清理孤儿失败（文件被占用）: {f.name}")
         for d in self._download_dir.iterdir():
-            if d.is_dir() and d.name.isdigit() and int(d.name) not in known:
-                _rmtree(d)
-                logger.info(f"清理孤儿: {d.name}")
+            if (
+                d.is_dir()
+                and d.name.isdigit()
+                and int(d.name) not in known
+                and int(d.name) not in self._orphan_aids
+            ):
+                try:
+                    _rmtree(d)
+                    logger.info(f"清理孤儿: {d.name}")
+                except OSError:
+                    # orphan 线程仍在写入时 rmdir 会 WinError 145；跳过，
+                    # 等 _release_orphan_after 延迟释放后再清
+                    logger.warning(f"清理孤儿目录失败（可能仍被占用）: {d.name}")
 
     @staticmethod
     def _fmt(b: int) -> str:

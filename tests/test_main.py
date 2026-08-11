@@ -16,8 +16,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import types
+import tempfile
+import threading
 import time
+import types
 import unittest
 from pathlib import Path
 from typing import Any
@@ -102,6 +104,7 @@ from jmdown.main import (  # noqa: E402
     _generate_password,
     _parse_target,
 )
+from jmdown.cache import CacheEntry  # noqa: E402
 
 
 def make_plugin() -> JMdownPlugin:
@@ -110,6 +113,8 @@ def make_plugin() -> JMdownPlugin:
     p._max_concurrent = 2
     p._upload_timeout = 300
     p._allow_cross_session = False
+    p._download_threads = 45
+    p._notify_llm = True
     return p
 
 
@@ -354,6 +359,265 @@ class CleanupTaskTest(unittest.IsolatedAsyncioTestCase):
         p._running_tasks[99] = asyncio.current_task()  # 让自我保护放行
         p._cleanup_task(state)
         self.assertLessEqual(len(p._task_registry), 30)
+
+
+class ConfigLoadTest(unittest.TestCase):
+    """C1: _load_config 读取 section 分组配置，并兼容旧版平铺结构。"""
+
+    def test_section_nested(self):
+        p = JMdownPlugin(
+            MagicMock(),
+            {
+                "download": {"download_threads": 30, "max_concurrent": 3},
+                "content": {
+                    "content_query": True,
+                    "block_content_tools": False,
+                    "allow_cross_session": True,
+                },
+                "encryption": {"zip_encrypt": False, "custom_password": "pw"},
+                "quality": {"pdf_quality": 70},
+                "upload": {"upload_timeout": 600, "chunk_size": 1024 * 1024},
+                "cache": {"max_cache": 5},
+                "notification": {"notify_llm": False},
+            },
+        )
+        p._load_config()
+        self.assertEqual(p._download_threads, 30)
+        self.assertEqual(p._max_concurrent, 3)
+        self.assertTrue(p._content_query)
+        self.assertFalse(p._block_content_tools)
+        self.assertTrue(p._allow_cross_session)
+        self.assertEqual(p._custom_password, "pw")
+        self.assertEqual(p._pdf_quality, 70)
+        self.assertEqual(p._upload_timeout, 600)
+        self.assertEqual(p._chunk_size, 1024 * 1024)
+        self.assertEqual(p._max_cache, 5)
+        self.assertFalse(p._notify_llm)
+
+    def test_flat_legacy_fallback(self):
+        """旧版平铺配置（<2.10.0 生成的 jmdown.json）仍可读取。"""
+        p = JMdownPlugin(
+            MagicMock(),
+            {
+                "download_threads": 30,
+                "max_concurrent": 3,
+                "content_query": True,
+                "allow_cross_session": True,
+            },
+        )
+        p._load_config()
+        self.assertEqual(p._download_threads, 30)
+        self.assertEqual(p._max_concurrent, 3)
+        self.assertTrue(p._content_query)
+        self.assertTrue(p._allow_cross_session)
+        self.assertEqual(p._max_cache, 10)  # 未提供 → 默认
+
+    def test_section_precedence_over_flat(self):
+        p = JMdownPlugin(
+            MagicMock(),
+            {"download": {"download_threads": 60}, "download_threads": 30},
+        )
+        p._load_config()
+        self.assertEqual(p._download_threads, 60)
+
+    def test_section_not_dict_falls_back(self):
+        p = JMdownPlugin(MagicMock(), {"download": "oops", "download_threads": 30})
+        p._load_config()
+        self.assertEqual(p._download_threads, 30)
+
+    def test_defaults_when_empty(self):
+        p = JMdownPlugin(MagicMock(), {})
+        p._load_config()
+        self.assertEqual(p._download_threads, 45)
+        self.assertEqual(p._max_concurrent, 2)
+        self.assertFalse(p._content_query)
+        self.assertTrue(p._block_content_tools)
+        self.assertFalse(p._allow_cross_session)
+        self.assertFalse(p._zip_encrypt)
+        self.assertEqual(p._custom_password, "")
+        self.assertEqual(p._pdf_quality, 85)
+        self.assertEqual(p._upload_timeout, 300)
+        self.assertEqual(p._chunk_size, 512 * 1024)
+        self.assertEqual(p._max_cache, 10)
+        self.assertTrue(p._notify_llm)
+
+    def test_clamping(self):
+        p = JMdownPlugin(
+            MagicMock(),
+            {
+                "download": {"download_threads": 0, "max_concurrent": 0},
+                "upload": {"upload_timeout": 0, "chunk_size": 1},
+            },
+        )
+        p._load_config()
+        self.assertEqual(p._download_threads, 1)
+        self.assertEqual(p._max_concurrent, 1)
+        self.assertEqual(p._upload_timeout, 1)
+        self.assertEqual(p._chunk_size, 4096)
+
+    def test_zip_encrypt_requires_pyzipper(self):
+        p = JMdownPlugin(MagicMock(), {"encryption": {"zip_encrypt": True}})
+        with patch("builtins.__import__", side_effect=ImportError):
+            with self.assertRaises(RuntimeError):
+                p._load_config()
+
+
+class OrphanCleanupTest(unittest.IsolatedAsyncioTestCase):
+    """D1: reload/terminate 取消任务时，jmcomic 同步线程无法被 cancel（orphan）。
+
+    取消路径必须登记 orphan 延迟释放；清理必须容错，否则 initialize 会因
+    WinError 145（目录非空，线程仍在写入）崩溃导致插件加载失败。
+    """
+
+    async def test_cancel_registers_orphan(self):
+        p = make_plugin()
+        p._cache = MagicMock()
+        p._cache.get.return_value = None
+        p._cache_dir = None
+        p._download_dir = None
+        p.ctx.publish_notice = AsyncMock()
+        state = TaskState(job_id="JOB-x", album_id=42, target="qq:dm:1")
+        started = threading.Event()
+        release = threading.Event()
+
+        def hanging_dl(*args, **kwargs):
+            started.set()
+            release.wait(10)
+
+        with patch("jmdown.main._download_images", side_effect=hanging_dl):
+            t = asyncio.create_task(p._task_runner(state))
+            # 轮询等待下载线程启动——不能同步阻塞事件循环（会饿死 _task_runner）
+            for _ in range(500):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(started.is_set())
+            t.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await t
+            release.set()
+        self.assertIn(42, p._orphan_aids)
+        # 清理测试内遗留的延迟释放 bg task，避免泄漏
+        bg = list(p._bg_tasks)
+        for b in bg:
+            b.cancel()
+        await asyncio.gather(*bg, return_exceptions=True)
+
+    async def test_release_orphan_cleans_download_dir(self):
+        """延迟释放到期后，残留的下载目录应被清理。"""
+        p = make_plugin()
+        with tempfile.TemporaryDirectory() as d:
+            dl = Path(d) / "downloads"
+            dl.mkdir()
+            (dl / "42").mkdir()
+            (dl / "42" / "a.jpg").write_bytes(b"x")
+            p._download_dir = dl
+            p._cache_dir = Path(d)
+            p._orphan_aids.add(42)
+            await p._release_orphan_after(42, 0)
+            self.assertNotIn(42, p._orphan_aids)
+            self.assertFalse((dl / "42").exists())
+
+    def test_clean_orphans_tolerates_failure(self):
+        """目录删除失败（WinError 145，线程仍占用）不应使 initialize 崩溃。"""
+        p = make_plugin()
+        with tempfile.TemporaryDirectory() as d:
+            cache_dir = Path(d) / "cache"
+            cache_dir.mkdir()
+            dl = Path(d) / "downloads"
+            dl.mkdir()
+            (dl / "424022").mkdir()
+            p._cache_dir = cache_dir
+            p._download_dir = dl
+            p._cache = MagicMock()
+            p._cache.list_all.return_value = []
+            with patch(
+                "jmdown.main._rmtree", side_effect=OSError(145, "目录不是空的")
+            ):
+                p._clean_orphans()  # 不应抛
+
+    def test_clean_orphans_skips_orphan_aid_dirs(self):
+        """_orphan_aids 中的目录应跳过，等待延迟释放后清理。"""
+        p = make_plugin()
+        with tempfile.TemporaryDirectory() as d:
+            dl = Path(d) / "downloads"
+            dl.mkdir()
+            (dl / "42").mkdir()
+            (dl / "43").mkdir()
+            p._download_dir = dl
+            p._cache_dir = Path(d)
+            p._cache = MagicMock()
+            p._cache.list_all.return_value = []
+            p._orphan_aids.add(42)
+            p._clean_orphans()
+            self.assertTrue((dl / "42").exists())  # orphan 跳过
+            self.assertFalse((dl / "43").exists())  # 非 orphan 仍清理
+
+
+class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
+    """E2: 上传 watchdog 与发送阶段超时。"""
+
+    async def test_watchdog_keeps_original_timeout_message(self):
+        """send_action 的超时信息（含 action 名）不应被"上传超时, 已取消"吞掉。"""
+        p = make_plugin()
+
+        async def slow():
+            raise TimeoutError("请求 upload_private_file 超时")
+
+        with self.assertRaises(TimeoutError) as cm:
+            await p._upload_with_watchdog(slow(), 60)
+        self.assertIn("upload_private_file", str(cm.exception))
+
+    async def test_task_runner_cache_hit_passes_send_timeout(self):
+        """缓存命中路径调用 send_file_via_stream 时必须传 send_timeout。"""
+        p = make_plugin()
+        p.ctx.publish_notice = AsyncMock()
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            dl = Path(d) / "downloads"
+            dl.mkdir()
+            cache_dir = Path(d) / "cache"
+            cache_dir.mkdir()
+            pdf = cache_dir / "7.pdf"
+            pdf.write_bytes(b"%PDF-fake")
+            p._download_dir = dl
+            p._cache_dir = cache_dir
+            entry = CacheEntry(
+                album_id=7,
+                title="T",
+                description="",
+                page_count=1,
+                pdf_path=str(pdf),
+                size_bytes=10,
+                downloaded_at=time.time(),
+            )
+            p._cache = MagicMock()
+            p._cache.get.return_value = entry
+            p._content_query = False
+            p._zip_encrypt = False
+            p._chunk_size = 512 * 1024
+
+            captured: dict = {}
+
+            async def fake_send(ctx, sid, user_id, file_path, is_group, group_id, timeout, progress_cb, chunk_size, send_timeout):
+                captured.update(
+                    {
+                        "timeout": timeout,
+                        "send_timeout": send_timeout,
+                        "file_path": file_path,
+                    }
+                )
+                return "ok"
+
+            # main.py 在函数内 `from .napcat_stream import ...`，patch 模块属性
+            with patch("jmdown.napcat_stream.send_file_via_stream", new=fake_send):
+                state = TaskState(job_id="JOB-c", album_id=7, target="qq:dm:1")
+                await p._task_runner(state)
+
+            self.assertEqual(captured["timeout"], max(10, p._upload_timeout // 10))
+            self.assertEqual(captured["send_timeout"], p._upload_timeout + 120)
+            self.assertEqual(state.status, "done")
 
 
 if __name__ == "__main__":

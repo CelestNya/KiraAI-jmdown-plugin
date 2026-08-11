@@ -6,83 +6,146 @@
 |------|------|------|--------|------|
 | 下载 | `download_threads` | `integer` | 45 | 下载图片的并行线程数 |
 | | `max_concurrent` | `integer` | 2 | 同时最多下载任务数 |
-| | `upload_timeout` | `integer` | 300 | 上传超时秒数 |
-| 上传 | `chunk_size` | `integer` | 524288 | Stream 分片字节数，默认 512KB |
-| 输出 | `pdf_quality` | `integer` | 85 | JPEG 质量 (1-100) |
-| | `zip_encrypt` | `switch` | false | 开启后加密 ZIP（AES-256），关闭后直接发 PDF |
-| | `custom_password` | `string` | "" | 自定义密码，留空自动随机生成 |
-| 缓存 | `max_cache` | `integer` | 10 | 最多缓存几本 PDF |
-| 内容访问 | `content_query` | `switch` | false | 允许搜索和查看本子元信息 |
+| 内容审核 | `content_query` | `switch` | false | 允许搜索和查看本子元信息 |
 | | `block_content_tools` | `switch` | true | content_query 关闭时：true=不注册，false=拦截提示 |
-| 转发控制 | `allow_cross_session` | `switch` | false | 允许转发到其他会话，关闭时 target 只能设为当前会话 |
+| | `allow_cross_session` | `switch` | false | 允许转发到其他会话，关闭时 target 只能设为当前会话 |
+| 加密 | `zip_encrypt` | `switch` | false | 开启后加密 ZIP（AES-256），关闭后直接发 PDF |
+| | `custom_password` | `string` | "" | 自定义密码，留空自动随机生成 |
+| 质量 | `pdf_quality` | `integer` | 85 | JPEG 质量 (1-100) |
+| 上传 | `upload_timeout` | `integer` | 300 | 上传超时秒数 |
+| | `chunk_size` | `integer` | 524288 | Stream 分片字节数，默认 512KB |
+| 缓存 | `max_cache` | `integer` | 10 | 最多缓存几本 PDF |
 | 通知 | `notify_llm` | `switch` | true | 完成后是否触发 LLM 回复 |
 
 ## schema.json
 
+配置项按功能分组（`type: "section"`），子字段嵌套在 `fields` 中：
+
 ```json
 {
-    "download_threads": {
-        "type": "integer",
-        "default": 45,
-        "hint": "下载图片的并行线程数"
+    "download": {
+        "type": "section",
+        "name": "下载",
+        "hint": "下载相关配置",
+        "collapsed": false,
+        "fields": {
+            "download_threads": {
+                "type": "integer",
+                "default": 45,
+                "hint": "下载图片的并行线程数"
+            },
+            "max_concurrent": {
+                "type": "integer",
+                "default": 2,
+                "hint": "同时最多下载任务数，防止大规模批量下载占用资源"
+            }
+        }
     },
-    "max_concurrent": {
-        "type": "integer",
-        "default": 2,
-        "hint": "同时最多下载任务数，防止大规模批量下载占用资源"
+    "content": {
+        "type": "section",
+        "name": "内容审核",
+        "hint": "搜索与元信息查询工具的控制",
+        "collapsed": false,
+        "fields": {
+            "content_query": {
+                "type": "switch",
+                "default": false,
+                "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 受下方开关控制"
+            },
+            "block_content_tools": {
+                "type": "switch",
+                "default": true,
+                "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用"
+            },
+            "allow_cross_session": {
+                "type": "switch",
+                "default": false,
+                "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话"
+            }
+        }
     },
-    "upload_timeout": {
-        "type": "integer",
-        "default": 300,
-        "hint": "上传超时秒数（大文件建议 300+）"
+    "encryption": {
+        "type": "section",
+        "name": "加密",
+        "hint": "ZIP 加密发送相关配置",
+        "collapsed": false,
+        "fields": {
+            "zip_encrypt": {
+                "type": "switch",
+                "default": false,
+                "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩"
+            },
+            "custom_password": {
+                "type": "string",
+                "default": "",
+                "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）"
+            }
+        }
     },
-    "chunk_size": {
-        "type": "integer",
-        "default": 524288,
-        "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB"
+    "quality": {
+        "type": "section",
+        "name": "质量",
+        "hint": "PDF 合成质量配置",
+        "collapsed": false,
+        "fields": {
+            "pdf_quality": {
+                "type": "integer",
+                "default": 85,
+                "hint": "JPEG 质量 (1-100)，越高文件越大画质越好"
+            }
+        }
     },
-    "pdf_quality": {
-        "type": "integer",
-        "default": 85,
-        "hint": "JPEG 质量 (1-100)，越高文件越大画质越好"
+    "upload": {
+        "type": "section",
+        "name": "上传",
+        "hint": "NapCat 分片上传配置",
+        "collapsed": false,
+        "fields": {
+            "upload_timeout": {
+                "type": "integer",
+                "default": 300,
+                "hint": "上传超时秒数（大文件建议 300+）"
+            },
+            "chunk_size": {
+                "type": "integer",
+                "default": 524288,
+                "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB"
+            }
+        }
     },
-    "zip_encrypt": {
-        "type": "switch",
-        "default": false,
-        "hint": "开启后压缩为加密 ZIP（AES-256），绕过 QQ 内容审查。关闭后直接发送原始 PDF，不打包不压缩"
+    "cache": {
+        "type": "section",
+        "name": "缓存",
+        "hint": "PDF 缓存配置",
+        "collapsed": false,
+        "fields": {
+            "max_cache": {
+                "type": "integer",
+                "default": 10,
+                "hint": "最多缓存几本 PDF，超限自动删最旧"
+            }
+        }
     },
-    "custom_password": {
-        "type": "string",
-        "default": "",
-        "hint": "自定义加密密码。留空则自动生成随机强密码（需开启 zip_encrypt 才生效）"
-    },
-    "max_cache": {
-        "type": "integer",
-        "default": 10,
-        "hint": "最多缓存几本 PDF，超限自动删最旧"
-    },
-    "content_query": {
-        "type": "switch",
-        "default": false,
-        "hint": "允许搜索和查看本子元信息。关闭后 search_jm_album 和 query_jm_album 受下方开关控制"
-    },
-    "block_content_tools": {
-        "type": "switch",
-        "default": true,
-        "hint": "当 content_query=关闭 时：true=直接不注册工具，LLM 完全看不到；false=保留工具但调用时返回「已关闭」提示。content_query=开启时此开关无效，工具正常可用"
-    },
-    "allow_cross_session": {
-        "type": "switch",
-        "default": false,
-        "hint": "允许转发到其他会话。关闭时 send_jm_album 的 target 只能设置为调用者所在的会话"
-    },
-    "notify_llm": {
-        "type": "switch",
-        "default": true,
-        "hint": "任务完成后是否在目标会话触发 LLM 自动回复"
+    "notification": {
+        "type": "section",
+        "name": "通知",
+        "hint": "任务完成通知配置",
+        "collapsed": false,
+        "fields": {
+            "notify_llm": {
+                "type": "switch",
+                "default": true,
+                "hint": "任务完成后是否在目标会话触发 LLM 自动回复"
+            }
+        }
     }
 }
 ```
+
+## 配置读取与兼容
+
+- section 的子字段由核心**嵌套存储**到插件配置文件（如 `{"download": {"download_threads": 45}}`），插件内通过 `self.plugin_cfg.get("download", {}).get("download_threads")` 读取。
+- 分组前生成的平铺配置仍被兼容：`_load_config()` 读取顺序为 section 嵌套值 > 旧版平铺值 > 默认值。用户首次在 WebUI 保存分组配置后，配置文件自动迁移为嵌套结构。
 
 ## 配置说明
 
