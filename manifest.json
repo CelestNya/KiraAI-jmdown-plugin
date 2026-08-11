@@ -1,7 +1,7 @@
 {
     "display_name": "JMComic 下载器",
     "plugin_id": "jmdown",
-    "version": "2.10.0",
+    "version": "2.9.4",
     "author": "CelestNya",
     "description": "下载 JMComic 本子并合成为 PDF，包含了完整的后台发送功能",
     "repo": "https://github.com/CelestNya/KiraAI-jmdown-plugin",
