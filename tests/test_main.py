@@ -395,7 +395,7 @@ class ConfigLoadTest(unittest.TestCase):
         self.assertFalse(p._notify_llm)
 
     def test_flat_legacy_fallback(self):
-        """旧版平铺配置（<2.10.0 生成的 jmdown.json）仍可读取。"""
+        """旧版平铺配置（schema 分组前生成的 jmdown.json）仍可读取。"""
         p = JMdownPlugin(
             MagicMock(),
             {
