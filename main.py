@@ -424,7 +424,10 @@ class JMdownPlugin(BasePlugin):
             self._clean_orphans()
 
         # content_query=false 时：block_content_tools=true 不注册，false 仅拦截
-        from core.plugin.plugin_registry import _plugin_components
+        try:
+            from core.plugin.registry import _plugin_components
+        except ImportError:  # 旧版核心路径兜底
+            from core.plugin.plugin_registry import _plugin_components
 
         pid = self.ctx.plugin_mgr.get_plugin_id_for_module(__name__)
         comp = _plugin_components.get(pid)
