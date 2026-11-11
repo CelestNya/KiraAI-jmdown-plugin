@@ -12,7 +12,10 @@
 | 加密 | `zip_encrypt` | `switch` | false | 开启后加密 ZIP（AES-256），关闭后直接发 PDF |
 | | `custom_password` | `string` | "" | 自定义密码，留空自动随机生成 |
 | 质量 | `pdf_quality` | `integer` | 85 | JPEG 质量 (1-100) |
-| 上传 | `upload_timeout` | `integer` | 300 | 上传超时秒数 |
+| 上传 | `use_napcat_stream` | `switch` | false | 使用 NapCat 分片上传；关闭走 OneBot 通用上传 |
+| | `file_payload` | `string` | auto | 标准上传载荷：auto / path / base64 |
+| | `standard_max_mb` | `integer` | 10 | base64 内联的原始体积上限（MB） |
+| | `upload_timeout` | `integer` | 300 | 上传超时秒数 |
 | | `chunk_size` | `integer` | 524288 | Stream 分片字节数，默认 512KB |
 | 缓存 | `max_cache` | `integer` | 10 | 最多缓存几本 PDF |
 | 通知 | `notify_llm` | `switch` | true | 完成后是否触发 LLM 回复 |
@@ -98,9 +101,25 @@
     "upload": {
         "type": "section",
         "name": "上传",
-        "hint": "NapCat 分片上传配置",
+        "hint": "文件发送方式与超时配置",
         "collapsed": false,
         "fields": {
+            "use_napcat_stream": {
+                "type": "switch",
+                "default": false,
+                "hint": "使用 NapCat 分片上传（NapCat 专有接口），关闭走 OneBot 通用上传"
+            },
+            "file_payload": {
+                "type": "string",
+                "default": "auto",
+                "options": ["auto", "path", "base64"],
+                "hint": "标准上传载荷：auto 按 NapCat 地址判定，path 仅同机，base64 跨机可用"
+            },
+            "standard_max_mb": {
+                "type": "integer",
+                "default": 10,
+                "hint": "base64 内联的原始体积上限（MB），超过即拒绝"
+            },
             "upload_timeout": {
                 "type": "integer",
                 "default": 300,
@@ -180,7 +199,32 @@ FIFO 队列。新条目超出上限时，删除最早下载的条目。索引持
 
 ### upload_timeout
 
-NapCat Stream API 的单次 `send_action` 超时。大文件（50MB+）上传可能需要 300s 以上，建议按文件大小调整。外层 `asyncio.wait_for` 做硬超时兜底。
+单次 `send_action` 的超时。大文件（50MB+）上传可能需要 300s 以上，建议按文件大小调整。外层 `asyncio.wait_for` 做硬超时兜底。
+
+### use_napcat_stream
+
+分片上传（`upload_file_stream`）是 NapCat 专有接口，其他 OneBot 实现不提供。关闭时插件改用
+`upload_private_file` / `upload_group_file` —— OneBot 生态的通用扩展动作，NapCat、LLOneBot、
+Lagrange 都实现。默认关闭，即默认不绑定 NapCat。
+
+### file_payload
+
+`file` 参数的形态决定了可用性边界：
+
+| 值 | 行为 | 适用 |
+|----|------|------|
+| `auto` | 按 NapCat WS 地址判定：回环地址用路径，其他用 base64 | 默认；换部署形态不用改配置 |
+| `path` | 传 NapCat 所在机器上的绝对路径 | 必须同机，零膨胀，速度快 |
+| `base64` | 内联文件内容 | 跨机可用，体积 +33%，受请求体上限约束 |
+
+NapCat 与本插件不在同一台机器时，`path` 会让远端报「文件不存在」——这类错误很难定位，
+所以 `auto` 的默认判定是「不确定就内联」。
+
+### standard_max_mb
+
+base64 内联的体积闸门。超过即拒绝并给出指引（同机部署 / 改分片 / 降质量），
+避免把「撞实现方上限」的代价转成用户侧的长时间等待。
+NapCat WS 接收帧上限 16MB，base64 膨胀 4/3，默认 10MB 为 JSON 信封留足余量。
 
 ## 运行时配置目录
 

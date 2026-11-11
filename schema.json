@@ -118,9 +118,46 @@
     "upload": {
         "type": "section",
         "name": "上传",
-        "hint": "NapCat 分片上传配置",
+        "hint": "文件发送方式与超时配置",
         "collapsed": false,
         "fields": {
+            "use_napcat_stream": {
+                "type": "switch",
+                "name": "使用 NapCat 分片上传",
+                "default": false,
+                "hint": "关闭时走 OneBot 通用上传（upload_private_file / upload_group_file），不依赖 NapCat 专有接口；开启后改用 upload_file_stream 分片，仅 NapCat 可用",
+                "locales": {
+                    "zh": {
+                        "name": "使用 NapCat 分片上传",
+                        "hint": "关闭时走 OneBot 通用上传（upload_private_file / upload_group_file），不依赖 NapCat 专有接口；开启后改用 upload_file_stream 分片，仅 NapCat 可用"
+                    }
+                }
+            },
+            "file_payload": {
+                "type": "string",
+                "name": "标准上传载荷",
+                "default": "auto",
+                "options": ["auto", "path", "base64"],
+                "hint": "关闭分片时生效。auto=按 NapCat 地址判断：本机用路径直传，跨机用 base64；path=只给路径（要求同机）；base64=内联内容（跨机可用，体积 +33%）",
+                "locales": {
+                    "zh": {
+                        "name": "标准上传载荷",
+                        "hint": "关闭分片时生效。auto=按 NapCat 地址判断：本机用路径直传，跨机用 base64；path=只给路径（要求同机）；base64=内联内容（跨机可用，体积 +33%）"
+                    }
+                }
+            },
+            "standard_max_mb": {
+                "type": "integer",
+                "name": "内联上传上限",
+                "default": 10,
+                "hint": "base64 内联时的原始文件体积上限（MB）。超过即拒绝并提示改用路径直传或分片，避免撞实现方请求体上限后以超时收场",
+                "locales": {
+                    "zh": {
+                        "name": "内联上传上限",
+                        "hint": "base64 内联时的原始文件体积上限（MB）。超过即拒绝并提示改用路径直传或分片，避免撞实现方请求体上限后以超时收场"
+                    }
+                }
+            },
             "upload_timeout": {
                 "type": "integer",
                 "name": "上传超时",
@@ -141,7 +178,7 @@
             }
         },
         "locales": {
-            "zh": { "name": "上传", "hint": "NapCat 分片上传配置" }
+            "zh": { "name": "上传", "hint": "文件发送方式与超时配置" }
         }
     },
     "cache": {
