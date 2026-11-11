@@ -9,8 +9,8 @@ KiraAI 插件：下载禁漫天堂 (JMComic) 本子，合成 PDF，通过 NapCat
 cd /path/to/KiraAI/data/plugins
 git clone https://github.com/CelestNya/KiraAI-jmdown-plugin.git jmdown
 
-# 安装依赖
-pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6 pyzipper>=0.4
+# 安装依赖（用 KiraAI 自己的解释器，插件不另建 venv）
+cd jmdown && ../../../venv/Scripts/python.exe -m pip install -r requirements.txt
 
 # 重启 KiraAI，插件自动加载
 ```

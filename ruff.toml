@@ -1,0 +1,27 @@
+# 插件是独立仓库，配置独立于 KiraAI 主仓（主仓 ruff.toml 排除了 data/）。
+# 规则集刻意保持保守：先补齐「正确性 + import 卫生」，风格类规则交给 formatter。
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = [
+    "E4", # import 相关错误
+    "E7", # 语法层面的错误
+    "E9", # 运行时错误
+    "F",  # pyflakes：未使用变量/导入、未定义名称
+    "I",  # isort：import 排序
+    "B",  # bugbear：易错写法（raise from、可变默认值等）
+    "UP", # pyupgrade：过时语法
+]
+# E501 关闭：本项目大量中文注释与提示语，硬断行会牺牲可读性；
+# formatter 已保证代码部分的换行。
+ignore = ["E501"]
+
+[lint.isort]
+known-first-party = ["cache", "napcat_stream"]
+
+[lint.per-file-ignores]
+"tests/**" = [
+    # 必须先执行 _core_stub.bootstrap() 注入 core 桩，再导入插件模块
+    "E402",
+]
