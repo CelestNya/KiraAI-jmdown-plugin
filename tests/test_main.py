@@ -1,101 +1,29 @@
 """JMdown main.py 核心逻辑测试。
 
-通过 sys.modules 注入 core 框架的轻量 mock，使 main.py 可在无 KiraAI 运行时
+core 框架由 ``tests/_core_stub.py`` 注入，使 main.py 可在无 KiraAI 运行时
 环境下导入，从而隔离测试插件自身逻辑（输入校验、去重、并发上限、跨会话拦截）。
 
 Run:
-    uv run python -m pytest tests/test_main.py -v
-    # or
-    uv run python -m unittest tests.test_main -v
+    pytest tests/test_main.py -v
 """
-# jmdown 包与 core.* 在运行时由本文件注入 sys.modules，pyright 静态无法解析
+# jmdown 包与 core.* 由 tests/_core_stub.py 注入，pyright 静态无法解析
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false
 
 from __future__ import annotations
 
 import asyncio
-import logging
-import sys
 import tempfile
 import threading
 import time
-import types
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# ── 在 import main 之前注入 core 框架 mock（仅当真实 core 不可用时）──
-ROOT = Path(__file__).resolve().parent.parent
+import _core_stub
 
+_core_stub.bootstrap()
 
-def _install_core_mock() -> None:
-    """注入 core.* 桩模块，避免依赖完整 KiraAI 运行时。"""
-    # Any 注解：ModuleType 实例需动态挂属性，pyright 下按 Any 处理
-    core: Any = types.ModuleType("core")
-    plugin_pkg: Any = types.ModuleType("core.plugin")
-
-    class BasePlugin:
-        def __init__(self, ctx, cfg):
-            self.ctx = ctx
-            self.plugin_cfg = cfg
-
-        async def initialize(self) -> None:
-            pass
-
-        async def terminate(self) -> None:
-            pass
-
-    def register_tool(name: str, description: str, params: dict):
-        # 装饰器只透传原函数，测试不关心工具注册
-        def deco(f):
-            return f
-
-        return deco
-
-    plugin_pkg.BasePlugin = BasePlugin
-    plugin_pkg.PluginContext = object
-    plugin_pkg.register_tool = register_tool
-    plugin_pkg.logger = logging.getLogger("jmdown.test")
-    core.plugin = plugin_pkg
-
-    chat: Any = types.ModuleType("core.chat")
-    me: Any = types.ModuleType("core.chat.message_elements")
-
-    class Text:
-        def __init__(self, text: str):
-            self.text = text
-
-    me.Text = Text
-    mu: Any = types.ModuleType("core.chat.message_utils")
-
-    class MessageChain:
-        def __init__(self, message_list=None):
-            self.message_list = message_list or []
-
-    mu.MessageChain = MessageChain
-    chat.message_elements = me
-    chat.message_utils = mu
-
-    sys.modules.update(
-        {
-            "core": core,
-            "core.plugin": plugin_pkg,
-            "core.chat": chat,
-            "core.chat.message_elements": me,
-            "core.chat.message_utils": mu,
-        }
-    )
-
-
-_install_core_mock()
-
-# 把插件根注册为 `jmdown` 包，使 main.py 的 `from .cache import ...` 相对导入生效
-if "jmdown" not in sys.modules:
-    _pkg: Any = types.ModuleType("jmdown")
-    _pkg.__path__ = [str(ROOT)]
-    sys.modules["jmdown"] = _pkg
-
+from jmdown.cache import CacheEntry  # noqa: E402
 from jmdown.main import (  # noqa: E402
     JMDownError,
     JMdownPlugin,
@@ -104,7 +32,6 @@ from jmdown.main import (  # noqa: E402
     _generate_password,
     _parse_target,
 )
-from jmdown.cache import CacheEntry  # noqa: E402
 
 
 def make_plugin() -> JMdownPlugin:
@@ -352,9 +279,7 @@ class CleanupTaskTest(unittest.IsolatedAsyncioTestCase):
         p = make_plugin()
         # 塞 35 条
         for i in range(35):
-            p._task_registry[f"JOB-{i}"] = TaskState(
-                job_id=f"JOB-{i}", album_id=i, target="qq:dm:1"
-            )
+            p._task_registry[f"JOB-{i}"] = TaskState(job_id=f"JOB-{i}", album_id=i, target="qq:dm:1")
         state = TaskState(job_id="JOB-trim", album_id=99, target="qq:dm:1")
         p._running_tasks[99] = asyncio.current_task()  # 让自我保护放行
         p._cleanup_task(state)
@@ -531,9 +456,7 @@ class OrphanCleanupTest(unittest.IsolatedAsyncioTestCase):
             p._download_dir = dl
             p._cache = MagicMock()
             p._cache.list_all.return_value = []
-            with patch(
-                "jmdown.main._rmtree", side_effect=OSError(145, "目录不是空的")
-            ):
+            with patch("jmdown.main._rmtree", side_effect=OSError(145, "目录不是空的")):
                 p._clean_orphans()  # 不应抛
 
     def test_clean_orphans_skips_orphan_aid_dirs(self):
@@ -600,7 +523,9 @@ class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
 
             captured: dict = {}
 
-            async def fake_send(ctx, sid, user_id, file_path, is_group, group_id, timeout, progress_cb, chunk_size, send_timeout):
+            async def fake_send(
+                ctx, sid, user_id, file_path, is_group, group_id, timeout, progress_cb, chunk_size, send_timeout
+            ):
                 captured.update(
                     {
                         "timeout": timeout,

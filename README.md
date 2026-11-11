@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](requirements.txt)
-[![Version](https://img.shields.io/badge/version-2.9.4-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.9.5-blue)](manifest.json)
 
 **jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 分片流传输发送到 QQ。
 
@@ -38,10 +38,10 @@ cd /path/to/KiraAI/data/plugins
 git clone https://github.com/CelestNya/KiraAI-jmdown-plugin.git jmdown
 ```
 
-2. 安装依赖（KiraAI 自动安装，也可手动）：
+2. 安装依赖（KiraAI 首次加载时会自动安装 `requirements.txt`，也可手动执行）：
 
 ```bash
-pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6 pyzipper>=0.4
+python -m pip install -r requirements.txt
 ```
 
 3. 重启 KiraAI，插件自动加载。
@@ -158,17 +158,34 @@ LLM → 告知用户任务已提交
 ## 项目结构
 
 ```
-├── __init__.py          # 插件入口
+├── __init__.py          # 包入口（惰性导出，不做模块级导入）
 ├── main.py              # 核心实现（工具、任务管理、下载、PDF、通知）
 ├── cache.py             # FIFO 缓存模块
 ├── napcat_stream.py     # NapCat Stream API 分片上传封装
 ├── manifest.json        # 插件元信息
 ├── schema.json          # 配置参数定义
-├── requirements.txt     # 依赖声明
+├── requirements.txt     # 依赖声明（KiraAI 安装时读取此文件）
+├── pytest.ini           # 测试入口配置（testpaths = tests）
+├── ruff.toml            # lint / format 规则
+├── tests/               # 单元测试（不依赖 KiraAI 运行时）
+├── scripts/             # 手动集成冒烟脚本
+├── .github/workflows/   # CI：lint + format + pytest（3.11 / 3.12 / 3.13）
 ├── docs/                # VitePress 开发者文档
 ├── LICENSE
 └── README.md
 ```
+
+## 开发
+
+```bash
+python -m pytest -q          # 84 个单元测试，约 2s
+ruff check .                 # 规则见 ruff.toml
+ruff format --check .
+```
+
+测试通过 `tests/_core_stub.py` 注入 `core` 桩，因此不需要完整 KiraAI 运行时；
+与真实框架的契约由 `scripts/local_smoke_test.py` 手动验证。详见
+[docs/development.md](docs/development.md)。
 
 ## 许可
 

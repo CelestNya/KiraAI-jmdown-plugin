@@ -1,52 +1,22 @@
-"""napcat_stream.py 测试 — 纯函数 + 分片上传链路 mock。
+"""napcat_stream.py 测试 —— 纯函数 + 分片上传链路 mock。
+
+napcat_stream 依赖 ``core.plugin.logger``，桩由 ``tests/_core_stub.py`` 注入。
 
 Run:
-    uv run python -m pytest tests/test_napcat.py -v
-    # or
-    uv run python -m unittest tests.test_napcat -v
+    pytest tests/test_napcat.py -v
 """
-# napcat_stream 依赖 core.plugin.logger，运行时由本文件注入 sys.modules
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false
 
 from __future__ import annotations
 
 import hashlib
-import logging
-import sys
-import types
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+import _core_stub
 
-
-def _install_core_mock() -> None:
-    """注入 core.* 桩模块（仅当真实 core 不可用时）。"""
-    existing = sys.modules.get("core")
-    if existing is not None and hasattr(existing, "plugin"):
-        return
-    core: Any = types.ModuleType("core")
-    plugin_pkg: Any = types.ModuleType("core.plugin")
-    plugin_pkg.logger = logging.getLogger("napcat.test")
-    plugin_pkg.BasePlugin = object
-    plugin_pkg.PluginContext = object
-
-    def register_tool(name: str, description: str, params: dict):
-        def deco(f):
-            return f
-
-        return deco
-
-    plugin_pkg.register_tool = register_tool
-    core.plugin = plugin_pkg
-    sys.modules["core"] = core
-    sys.modules["core.plugin"] = plugin_pkg
-
-
-_install_core_mock()
+_core_stub.bootstrap()
 
 from napcat_stream import (  # noqa: E402
     _find_qq_adapter,
@@ -118,9 +88,7 @@ class StreamUploadTest(unittest.IsolatedAsyncioTestCase):
             async def cb(pct: int, spd: str):
                 progress.append(pct)
 
-            remote = await stream_upload_file(
-                client, str(fp), timeout=5, progress_cb=cb, chunk_size=16
-            )
+            remote = await stream_upload_file(client, str(fp), timeout=5, progress_cb=cb, chunk_size=16)
             self.assertEqual(remote, "/remote/test.bin")
             # 3 分片 + 1 完成信号
             self.assertEqual(len(calls), 4)

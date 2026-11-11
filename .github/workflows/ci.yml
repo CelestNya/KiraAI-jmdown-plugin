@@ -1,0 +1,53 @@
+name: CI
+
+# 插件是独立仓库，KiraAI 主仓的 workflow（其 ruff 配置 extend-exclude = ["data"]）
+# 覆盖不到这里，因此门禁必须自建。
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+    branches: [master, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: py${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 下限由 manifest.core_version / KiraAI 决定，上限跟着 KiraAI CI 走
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          # 测试侧依赖：core 由 tests/_core_stub.py 提供桩，不需要 KiraAI 运行时
+          python -m pip install pytest ruff packaging
+
+      - name: Lint
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: 单元测试
+        # pytest.ini 已钉 testpaths=tests；scripts/local_smoke_test.py 需要真实
+        # KiraAI 与网络，不参与自动收集
+        run: python -m pytest -q

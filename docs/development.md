@@ -2,14 +2,22 @@
 
 ## 环境搭建
 
-```bash
-# 克隆
-git clone https://github.com/CelestNya/KiraAI-jmdown-plugin.git
-cd KiraAI-jmdown-plugin
+插件不是独立应用，它运行在 KiraAI 自己的 Python 环境里。**不要为插件另建 venv**，
+否则依赖装在了 KiraAI 看不到的地方，加载时仍会报 ModuleNotFoundError。
 
-# 依赖
-pip install jmcomic>=2.7 Pillow>=11 img2pdf>=0.6
+```bash
+# 1. 克隆到 KiraAI 的插件目录；目录名必须是 jmdown（与 manifest.plugin_id 一致）
+cd /path/to/KiraAI/data/plugins
+git clone https://github.com/CelestNya/KiraAI-jmdown-plugin.git jmdown
+
+# 2. 用 KiraAI 的解释器装依赖（KiraAI 首次加载插件时也会自动装 requirements.txt）
+cd jmdown
+../../../venv/Scripts/python.exe -m pip install -r requirements.txt   # Windows
+../../../venv/bin/python       -m pip install -r requirements.txt    # POSIX
 ```
+
+> 依赖一律写在 `requirements.txt` 里，不要在命令行直接写 `pip install jmcomic>=2.7`：
+> `>` 会被 shell 当成重定向，生成一个名为 `=2.7` 的文件，而包其实没装对版本。
 
 ## 项目文件说明
 
@@ -86,19 +94,70 @@ def _parse_target(target: str) -> tuple[str, bool, Optional[str]]:
 
 ## 测试
 
-### 单元测试
-
-测试在 `KiraAI-src` 的 uv 环境下运行（提供 jmcomic/PIL/img2pdf 等依赖）。`test_main.py` 通过 `sys.modules` 注入 `core` 框架桩，无需完整 KiraAI 运行时即可测插件逻辑。
-
 ```bash
-# pytest（tests/pytest.ini 已配 rootdir 与 import-mode）
-cd ../KiraAI-src && uv run python -m pytest ../KiraAI-jmdown-plugin/tests -v
-
-# 或 unittest discover
-cd ../KiraAI-src && uv run python -m unittest discover -s ../KiraAI-jmdown-plugin/tests -v
+cd /path/to/KiraAI/data/plugins/jmdown
+python -m pytest -q               # 全量，约 2s
+python -m pytest -q -k manifest   # 只跑元数据契约
+python -m pytest -q -x --lf       # 失败即停 + 只重跑上次失败
 ```
 
-覆盖范围：`cache.py` FIFO/加载容错、`main.py` 输入校验/去重/并发/跨会话/死任务/ZIP 清理/后台 task 生命周期、`napcat_stream.py` 分片上传链路/SHA256/适配器查找。
+### 为什么测试不依赖 KiraAI 运行时
+
+`tests/_core_stub.py` 用 `sys.modules` 注入 `core.plugin` / `core.chat.*` 的最小契约，
+`tests/conftest.py` 在任何用例被收集前完成注入并修正 `sys.path`。因此同一份用例在
+插件目录、KiraAI 根目录、CI 的干净 checkout 下结果一致。
+
+两条不能碰的红线：
+
+- **不要恢复 `tests/__init__.py`**：它会让 pytest 把插件根当成包导入，进而在导入期
+  触发 `core` 缺失（表现为「测试收集失败」，很容易被误判成插件坏了）。
+- **不要在 `__init__.py` 里做模块级 `from .main import`**：`main.py` 依赖 `core` 与
+  `jmcomic`，把入口改成惰性 `__getattr__` 之后，`import` 本身才是无副作用的。
+
+桩与真实框架的差异由 `scripts/local_smoke_test.py` 在真实 KiraAI 上兜底，两者职责不重叠。
+
+### 用例分布
+
+| 文件 | 覆盖 |
+|------|------|
+| `test_cache.py` | FIFO 淘汰、索引损坏容错、`_load_error` 防御 |
+| `test_main.py` | 输入校验、去重、并发上限、跨会话拦截、后台 task 生命周期 |
+| `test_napcat.py` | 分片上传链路、SHA256、适配器查找 |
+| `test_manifest.py` | manifest / schema / README / 源码的跨文件一致性 |
+
+### 元数据契约：改一处要同步三处
+
+新增或改名一个配置项，必须同时改：
+
+1. `schema.json` —— 声明控件与默认值
+2. `main.py` —— `_g(..., "key")` 真正读取
+3. `README.md` —— 配置表里的一行
+
+新增工具同理：`@tool(...)` 与 README 的 ``### 工具：`name` `` 必须成对。
+`test_manifest.py` 会双向比对，漏改直接红，不用等用户装上才发现。
+
+### 手动集成冒烟
+
+需要真实 KiraAI 环境与网络，手动执行：
+
+```bash
+cd /path/to/KiraAI/data/plugins/jmdown
+../../../venv/Scripts/python.exe scripts/local_smoke_test.py
+```
+
+脚本用临时目录当数据目录（不碰 `data/plugin_data/jmdown`），只读生产配置；
+KiraAI 根目录按 `<KiraAI>/data/plugins/jmdown` 上溯推断，也可用 `KIRAAI_ROOT` 覆盖。
+
+### 代码质量门禁
+
+```bash
+ruff check .            # 规则见 ruff.toml：E/F/I/B/UP，line-length 120
+ruff format --check .
+```
+
+`.github/workflows/ci.yml` 在 Python 3.11 / 3.12 / 3.13 上跑 lint + format + pytest，
+PR 到 `master` / `dev` 均触发。KiraAI 主仓的 workflow 覆盖不到这里（其 ruff 配置
+`extend-exclude = ["data"]`），所以门禁必须自建。
 
 ### 手动测试
 
@@ -125,18 +184,19 @@ cd ../KiraAI-src && uv run python -m unittest discover -s ../KiraAI-jmdown-plugi
 
 | 组件 | 要求 |
 |------|------|
-| Python | ≥ 3.11 |
-| KiraAI | 支持 `plugin_cfg` 和 `publish_notice` 的版本 |
+| Python | ≥ 3.11（CI 覆盖 3.11 / 3.12 / 3.13） |
+| KiraAI | `>= v3.0.0`（见 `manifest.core_version`），需支持 `plugin_cfg` 与 `publish_notice` |
 | jmcomic | ≥ 2.7 |
 | NapCat | 支持 `upload_file_stream` 动作 |
 
 ## 构建与发布
 
-无需构建步骤。插件以源码形式运行。发布时：
+无需构建步骤，插件以源码形式运行。发布检查：
 
-1. 更新 `manifest.json` 版本号
-2. 更新 `README.md` 文档
-3. 提交并打 tag
+1. `ruff check . && ruff format --check . && python -m pytest -q` 全绿（CI 会再跑一遍）
+2. 更新 `manifest.json` 版本号
+3. 同步 `README.md` 的版本徽章 —— `test_manifest.py` 会校验两者一致
+4. 提交并打 tag
 
 ## 贡献
 

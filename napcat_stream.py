@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import time
-from typing import Optional
 
 from core.plugin import logger
 
@@ -32,9 +31,7 @@ def _find_qq_adapter(adapter_mgr):
     adapters = adapter_mgr.get_adapters()
     for name, inst in adapters.items():
         if getattr(inst, "info", None) and inst.info.platform.upper() == "QQ":
-            logger.info(
-                f"Found QQ adapter: name={name!r}, platform={inst.info.platform!r}"
-            )
+            logger.info(f"Found QQ adapter: name={name!r}, platform={inst.info.platform!r}")
             return inst
     logger.warning(
         f"QQ adapter not found. Available: "
@@ -62,14 +59,12 @@ async def stream_upload_file(
     total_chunks = (file_size + chunk_size - 1) // chunk_size
     stream_id = f"jmdown_{int(time.time())}_{os.path.basename(file_path)}"
 
-    logger.info(
-        f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})"
-    )
+    logger.info(f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})")
 
     # expected_sha256 必须为完整文件 hash, 所有分片传同一个值
     # 分块读 + 丢线程, 避免一次性读入大文件并阻塞事件循环
     full_sha256 = await asyncio.to_thread(_sha256_file, file_path)
-    remote_path: Optional[str] = None
+    remote_path: str | None = None
     t0 = time.time()
     report_every = max(1, total_chunks // 20)  # 约 20 次通知
 
@@ -88,20 +83,15 @@ async def stream_upload_file(
                 "filename": os.path.basename(file_path),
             }
 
-            resp = await client.send_action(
-                "upload_file_stream", params, timeout=timeout
-            )
+            resp = await client.send_action("upload_file_stream", params, timeout=timeout)
             status = resp.get("status", "")
             if status != "ok":
                 raise RuntimeError(
-                    f"Stream chunk {i + 1}/{total_chunks} failed: "
-                    f"status={status} data={resp.get('data', {})}"
+                    f"Stream chunk {i + 1}/{total_chunks} failed: status={status} data={resp.get('data', {})}"
                 )
 
             # 报告进度（用全程平均速度，单chunk瞬时速度未使用）
-            if progress_cb and (
-                i == 0 or i == total_chunks - 1 or i % report_every == 0
-            ):
+            if progress_cb and (i == 0 or i == total_chunks - 1 or i % report_every == 0):
                 pct = min(int((i + 1) / total_chunks * 100), 100)
                 elapsed = time.time() - t0
                 avg_speed = (chunk_size * (i + 1)) / elapsed if elapsed > 0 else 0
@@ -120,15 +110,11 @@ async def stream_upload_file(
     )
     status = complete_resp.get("status", "")
     if status != "ok":
-        raise RuntimeError(
-            f"Stream completion signal failed: "
-            f"status={status} data={complete_resp.get('data', {})}"
-        )
+        raise RuntimeError(f"Stream completion signal failed: status={status} data={complete_resp.get('data', {})}")
     remote_path = complete_resp.get("data", {}).get("file_path", "")
     if not remote_path:
         raise RuntimeError(
-            f"Stream completed but no file_path in response: "
-            f"{json.dumps(complete_resp, ensure_ascii=False)}"
+            f"Stream completed but no file_path in response: {json.dumps(complete_resp, ensure_ascii=False)}"
         )
 
     return remote_path
@@ -140,9 +126,9 @@ async def send_file_via_stream(
     user_id: str,
     file_path: str,
     is_group: bool = False,
-    group_id: Optional[str] = None,
+    group_id: str | None = None,
     timeout: int = 300,
-    send_timeout: Optional[int] = None,
+    send_timeout: int | None = None,
     progress_cb=None,
     chunk_size: int = 512 * 1024,
 ) -> str:
@@ -166,9 +152,7 @@ async def send_file_via_stream(
     file_name = os.path.basename(file_path)
 
     # 1. 分片上传到 NapCat temp
-    remote_path = await stream_upload_file(
-        client, file_path, timeout, progress_cb, chunk_size
-    )
+    remote_path = await stream_upload_file(client, file_path, timeout, progress_cb, chunk_size)
     file_size = os.path.getsize(file_path)
     logger.info(f"Stream upload OK: {file_name} ({_fmt(file_size)}) → {remote_path}")
 
@@ -190,9 +174,7 @@ async def send_file_via_stream(
 
     status = resp.get("status", "")
     if status != "ok":
-        raise RuntimeError(
-            f"Send file failed: status={status} data={resp.get('data', {})}"
-        )
+        raise RuntimeError(f"Send file failed: status={status} data={resp.get('data', {})}")
 
     logger.info(f"File sent to {user_id}: {file_name}")
     return f"已通过流传输发送 ({_fmt(file_size)})"
