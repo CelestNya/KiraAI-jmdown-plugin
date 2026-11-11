@@ -378,6 +378,9 @@ class JMdownPlugin(BasePlugin):
         self._pdf_quality: int = 85
         self._upload_timeout: int = 300
         self._chunk_size: int = 512 * 1024
+        self._use_napcat_stream: bool = False
+        self._file_payload: str = "auto"
+        self._standard_max_bytes: int = 10 * 1024 * 1024
         self._allow_cross_session: bool = False
 
         # 后台任务系统
@@ -480,6 +483,10 @@ class JMdownPlugin(BasePlugin):
         self._content_query = bool(_g(content, "content_query", False))
         self._block_content_tools = bool(_g(content, "block_content_tools", True))
         self._allow_cross_session = bool(_g(content, "allow_cross_session", False))
+        # 默认走 OneBot 通用上传；分片是 NapCat 专有能力，必须显式开启
+        self._use_napcat_stream = bool(_g(upload, "use_napcat_stream", False))
+        self._file_payload = str(_g(upload, "file_payload", "auto"))
+        self._standard_max_bytes = max(1, int(_g(upload, "standard_max_mb", 10))) * 1024 * 1024
         self._zip_encrypt = bool(_g(encryption, "zip_encrypt", False))
         if self._zip_encrypt:
             try:
@@ -512,6 +519,47 @@ class JMdownPlugin(BasePlugin):
             # 保留 send_action 的原始超时信息（含 API 名），便于区分
             # 分片上传超时与发送阶段超时
             raise TimeoutError(f"上传超时: {e}") from e
+
+    async def _deliver(self, sid, user_id, is_group, group_id, upload_path, progress_cb) -> str:
+        """发送文件：按配置在「OneBot 通用上传」与「NapCat 分片」之间二选一。
+
+        两条链路的差异集中在载荷形态，任务流程不该知道这些细节，所以统一在
+        这里分派；调用方只关心进度回调与结果文本。
+        """
+        file_path = str(Path(upload_path).resolve())
+        ul_timeout = self._upload_timeout + 120
+
+        if self._use_napcat_stream:
+            from .napcat_stream import send_file_via_stream
+
+            coro = send_file_via_stream(
+                self.ctx,
+                sid,
+                user_id,
+                file_path,
+                is_group,
+                group_id,
+                max(10, self._upload_timeout // 10),
+                progress_cb=progress_cb,
+                chunk_size=self._chunk_size,
+                send_timeout=ul_timeout,
+            )
+        else:
+            from .file_send import send_file_standard
+
+            coro = send_file_standard(
+                self.ctx,
+                user_id,
+                file_path,
+                is_group=is_group,
+                group_id=group_id,
+                timeout=ul_timeout,
+                progress_cb=progress_cb,
+                payload_mode=self._file_payload,
+                max_bytes=self._standard_max_bytes,
+            )
+
+        return await self._upload_with_watchdog(coro, timeout=ul_timeout)
 
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
         """通过会话发送进度通知。mentioned=True 会触发目标会话 LLM 回复。"""
@@ -841,25 +889,7 @@ class JMdownPlugin(BasePlugin):
                     upload_path = str(zip_path.resolve())
                     state.phases["合成"] = "ZIP"
 
-                from .napcat_stream import send_file_via_stream
-
-                _chunk_to = max(10, self._upload_timeout // 10)
-                _ul_to = self._upload_timeout + 120
-                send_result = await self._upload_with_watchdog(
-                    send_file_via_stream(
-                        self.ctx,
-                        sid,
-                        user_id,
-                        upload_path,
-                        is_group,
-                        group_id,
-                        _chunk_to,
-                        progress_cb=_cache_upload_progress,
-                        chunk_size=self._chunk_size,
-                        send_timeout=_ul_to,
-                    ),
-                    timeout=_ul_to,
-                )
+                send_result = await self._deliver(sid, user_id, is_group, group_id, upload_path, _cache_upload_progress)
                 state.phases["上传"] = "已完成"
                 state.phases["发送"] = "已完成"
                 state.status = "done"
@@ -950,25 +980,7 @@ class JMdownPlugin(BasePlugin):
             async def _upload_progress(pct: int, spd: str):
                 state.phases["上传"] = f"{pct}% ({spd})"
 
-            from .napcat_stream import send_file_via_stream
-
-            _chunk_to = max(10, self._upload_timeout // 10)
-            _ul_timeout = self._upload_timeout + 120
-            send_result = await self._upload_with_watchdog(
-                send_file_via_stream(
-                    self.ctx,
-                    sid,
-                    user_id,
-                    str(upload_path.resolve()),
-                    is_group,
-                    group_id,
-                    _chunk_to,
-                    progress_cb=_upload_progress,
-                    chunk_size=self._chunk_size,
-                    send_timeout=_ul_timeout,
-                ),
-                timeout=_ul_timeout,
-            )
+            send_result = await self._deliver(sid, user_id, is_group, group_id, upload_path, _upload_progress)
             state.phases["上传"] = "已完成"
 
             # ── 5. 发送 ──

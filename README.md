@@ -130,8 +130,11 @@ LLM → 告知用户任务已提交
 | **质量** ||||
 | `pdf_quality` | integer | 85 | JPEG 质量 (1-100) |
 | **上传** ||||
+| `use_napcat_stream` | switch | false | 使用 NapCat 分片上传。关闭走 OneBot 通用上传（`upload_private_file` / `upload_group_file`），不依赖 NapCat 专有接口 |
+| `file_payload` | string | auto | 标准上传的载荷形态：auto / path / base64。auto 按 NapCat 地址判断（本机=路径，跨机=内联） |
+| `standard_max_mb` | integer | 10 | base64 内联的原始体积上限（MB），超过即拒绝并提示改用路径直传或分片 |
 | `upload_timeout` | integer | 300 | 上传超时秒数 |
-| `chunk_size` | integer | 524288 | Stream 分片字节数，默认 512KB |
+| `chunk_size` | integer | 524288 | Stream 分片字节数，默认 512KB（仅分片模式） |
 | **缓存** ||||
 | `max_cache` | integer | 10 | 最多缓存几本 PDF |
 | **通知** ||||

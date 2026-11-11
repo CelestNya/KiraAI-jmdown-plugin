@@ -492,8 +492,13 @@ class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("upload_private_file", str(cm.exception))
 
     async def test_task_runner_cache_hit_passes_send_timeout(self):
-        """缓存命中路径调用 send_file_via_stream 时必须传 send_timeout。"""
+        """分片模式下缓存命中路径必须区分分片超时与发送超时。
+
+        默认已改为 OneBot 通用上传（见 file_send），这里显式开启分片，
+        验证专有链路自身的超时拆分没被重构改坏。
+        """
         p = make_plugin()
+        p._use_napcat_stream = True
         p.ctx.publish_notice = AsyncMock()
         import tempfile
 
