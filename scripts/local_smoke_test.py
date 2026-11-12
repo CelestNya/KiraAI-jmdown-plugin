@@ -1,7 +1,12 @@
 """jmdown 插件本地集成冒烟测试（真实 KiraAI 环境 + 真实 jmcomic 网络）。
 
-在 KiraAI-src 的 uv 环境下运行：
-    cd ../KiraAI-src && uv run python ../KiraAI-jmdown-plugin/scripts/local_smoke_test.py
+手动运行，用 KiraAI 自己的解释器（插件在 KiraAI 内就是跑在这个环境里）：
+    cd <KiraAI>/data/plugins/jmdown
+    ../../../venv/Scripts/python.exe scripts/local_smoke_test.py   # Windows
+    ../../../venv/bin/python scripts/local_smoke_test.py           # POSIX
+
+KiraAI 根目录默认按 `<KiraAI>/data/plugins/jmdown` 上溯三级推断，也可用
+`KIRAAI_ROOT` 环境变量覆盖（插件不在 KiraAI 目录树内时必须显式指定）。
 
 设计约束：
 - 数据目录用临时目录，不碰生产 data/plugin_data/jmdown
@@ -16,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import types
@@ -23,16 +29,33 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 ROOT = Path(__file__).resolve().parent.parent
-KIRA_SRC = ROOT.parent / "KiraAI-src"
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(KIRA_SRC))
 
-# 插件目录名与包名不一致（KiraAI-jmdown-plugin → jmdown），手动注册包路径
+
+def _locate_kiraai_root() -> Path:
+    """定位 KiraAI 根目录：环境变量优先，其次按标准安装布局推断。"""
+    candidates: list[Path] = []
+    if env_root := os.environ.get("KIRAAI_ROOT"):
+        candidates.append(Path(env_root))
+    candidates.append(ROOT.parents[2])  # <KiraAI>/data/plugins/jmdown → <KiraAI>
+    candidates.append(ROOT.parent / "KiraAI-src")  # 旧布局（独立仓库并列放置）
+    for candidate in candidates:
+        if (candidate / "core" / "plugin").is_dir():
+            return candidate
+    raise SystemExit(
+        f"找不到 KiraAI 根目录（需包含 core/plugin）。已尝试: {[str(c) for c in candidates]}；可设置 KIRAAI_ROOT 指定。"
+    )
+
+
+KIRA_ROOT = _locate_kiraai_root()
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(KIRA_ROOT))
+
+# 插件以目录形式存放，包名与目录名一致；注册合成包以免依赖父目录在 sys.path 中
 _pkg = types.ModuleType("jmdown")
 _pkg.__path__ = [str(ROOT)]
 sys.modules["jmdown"] = _pkg
 
-# 运行于 KiraAI-src 环境：真实 core + 真实 jmcomic
+# 运行于 KiraAI 环境：真实 core + 真实 jmcomic
 from jmdown.main import JMdownPlugin  # noqa: E402
 
 PASS = 0
@@ -61,7 +84,7 @@ def make_ctx(data_dir: Path):
 
 def load_real_cfg() -> dict:
     """读取生产插件配置（只读）。"""
-    cfg_path = KIRA_SRC / "data" / "config" / "plugins" / "jmdown.json"
+    cfg_path = KIRA_ROOT / "data" / "config" / "plugins" / "jmdown.json"
     with cfg_path.open(encoding="utf-8") as f:
         return json.load(f)
 
@@ -116,9 +139,7 @@ async def main() -> int:
 
         # ── 3. 真实网络：不存在的 album_id（不返回任何本子内容）──
         try:
-            r = await asyncio.wait_for(
-                plugin.send_jm_album(ev, 999999999999, "qq:dm:1"), timeout=30
-            )
+            r = await asyncio.wait_for(plugin.send_jm_album(ev, 999999999999, "qq:dm:1"), timeout=30)
             check("不存在的 album_id 预查拒绝", "不存在" in r, r)
         except TimeoutError:
             check("不存在的 album_id 预查拒绝", False, "网络超时(30s)")

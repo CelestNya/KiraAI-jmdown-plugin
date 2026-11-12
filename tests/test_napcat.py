@@ -1,56 +1,27 @@
-"""napcat_stream.py 测试 — 纯函数 + 分片上传链路 mock。
+"""napcat_stream.py 测试 —— 纯函数 + 分片上传链路 mock。
+
+napcat_stream 依赖 ``core.plugin.logger``，桩由 ``tests/_core_stub.py`` 注入。
 
 Run:
-    uv run python -m pytest tests/test_napcat.py -v
-    # or
-    uv run python -m unittest tests.test_napcat -v
+    pytest tests/test_napcat.py -v
 """
-# napcat_stream 依赖 core.plugin.logger，运行时由本文件注入 sys.modules
 # pyright: reportMissingImports=false, reportAttributeAccessIssue=false
 
 from __future__ import annotations
 
 import hashlib
-import logging
-import sys
-import types
 import unittest
 from pathlib import Path
-from typing import Any
 from unittest.mock import MagicMock
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+import _core_stub
 
+_core_stub.bootstrap()
 
-def _install_core_mock() -> None:
-    """注入 core.* 桩模块（仅当真实 core 不可用时）。"""
-    existing = sys.modules.get("core")
-    if existing is not None and hasattr(existing, "plugin"):
-        return
-    core: Any = types.ModuleType("core")
-    plugin_pkg: Any = types.ModuleType("core.plugin")
-    plugin_pkg.logger = logging.getLogger("napcat.test")
-    plugin_pkg.BasePlugin = object
-    plugin_pkg.PluginContext = object
-
-    def register_tool(name: str, description: str, params: dict):
-        def deco(f):
-            return f
-
-        return deco
-
-    plugin_pkg.register_tool = register_tool
-    core.plugin = plugin_pkg
-    sys.modules["core"] = core
-    sys.modules["core.plugin"] = plugin_pkg
-
-
-_install_core_mock()
-
-from napcat_stream import (  # noqa: E402
+from jmdown.napcat_stream import (  # noqa: E402
     _find_qq_adapter,
     _fmt,
+    _make_stream_id,
     _sha256_file,
     send_file_via_stream,
     stream_upload_file,
@@ -118,9 +89,7 @@ class StreamUploadTest(unittest.IsolatedAsyncioTestCase):
             async def cb(pct: int, spd: str):
                 progress.append(pct)
 
-            remote = await stream_upload_file(
-                client, str(fp), timeout=5, progress_cb=cb, chunk_size=16
-            )
+            remote = await stream_upload_file(client, str(fp), timeout=5, progress_cb=cb, chunk_size=16)
             self.assertEqual(remote, "/remote/test.bin")
             # 3 分片 + 1 完成信号
             self.assertEqual(len(calls), 4)
@@ -226,6 +195,27 @@ class SendFileViaStreamTest(unittest.IsolatedAsyncioTestCase):
         for action, _, t in calls:
             if action == "upload_group_file":
                 self.assertEqual(t, 420)
+
+
+class StreamIdTest(unittest.TestCase):
+    """SnowLuma 用 /^[A-Za-z0-9_-]{1,128}$/ 校验 stream_id。
+
+    原实现直接拼 basename（含 .pdf / 中文 / 空格），第一片就会被拒绝。
+    """
+
+    def test_matches_snowluma_whitelist(self):
+        import re
+
+        valid = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+        for name in ("123456.pdf", "本子 名称.zip", "a+b(c).pdf", ".hidden", ""):
+            with self.subTest(name=name):
+                sid = _make_stream_id(f"/tmp/jmdown/{name}")
+                self.assertRegex(sid, valid)
+                self.assertLessEqual(len(sid), 128)
+                self.assertTrue(sid.startswith("jmdown_"))
+
+    def test_different_names_do_not_collide(self):
+        self.assertNotEqual(_make_stream_id("/tmp/a.pdf"), _make_stream_id("/tmp/b.pdf"))
 
 
 if __name__ == "__main__":

@@ -1,8 +1,12 @@
-"""
-NapCat Stream API 封装
+"""分片上传（upload_file_stream），大文件时绕开请求体上限。
 
-大文件分片上传，绕过 WebSocket 16MB 帧限制。
-复用主 WS 连接（通过 adapter.get_client()），不开新连接。
+该动作由 NapCat 引入，SnowLuma 做了 NapCat-compatible 实现；其余实现
+（LLOneBot / Lagrange.OneBot / OpenShamrock / go-cqhttp）不提供，能力矩阵见
+``impl_support.py``。复用主 WS 连接（adapter.get_client()），不开新连接。
+由配置 ``upload_method=stream`` 显式选择。
+
+分片期间的百分比是真实的（已确认分片数 / 总分片数）；分片完成后实现端
+把文件转存并发送给 QQ 这一段仍无进度回报，因此会额外上报一次 ``None``。
 """
 
 from __future__ import annotations
@@ -10,21 +14,57 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import json
 import os
+import re
 import time
-from typing import Optional
+from pathlib import Path
 
 from core.plugin import logger
 
+from .impl_support import (
+    FileSendError,
+    diagnosis_hint,
+    format_action_failure,
+    format_no_response,
+    is_ok_response,
+    response_summary,
+)
 
-class NapCatConfigError(RuntimeError):
-    """NapCat 配置错误（适配器/客户端不可用）"""
+
+class NapCatConfigError(FileSendError):
+    """配置错误（适配器/客户端不可用），与其余上传失败同族。"""
 
     pass
 
 
-CHUNK_SIZE = 512 * 1024  # 512KB — 减少 round-trip 次数, NapCat 帧上限 16MB
+CHUNK_SIZE = 512 * 1024  # 单片默认 512KB；实测 NapCat 4.18.14 maxPayload=50MiB，非文件大小闸门
+
+
+async def _call_action(
+    client, action: str, params: dict, timeout: float, *, stage: str, size_bytes: int | None = None
+) -> dict:
+    """统一包装 send_action：超时/断连都转成有内容的 FileSendError。"""
+    try:
+        return await client.send_action(action, params, timeout=timeout)
+    except TimeoutError as e:
+        raise FileSendError(format_no_response(action, timeout, stage=stage, size_bytes=size_bytes)) from e
+    except OSError as e:
+        raise FileSendError(
+            f"{stage}连接异常（{type(e).__name__}: {e}），{action} 未收到实现端响应。{diagnosis_hint()}"
+        ) from e
+
+
+# SnowLuma 用 /^[A-Za-z0-9_-]{1,128}$/ 校验 stream_id；NapCat 不限制。
+# 原实现直接拼 basename（含 .pdf / 中文 / 空格），第一片就会被 SnowLuma 拒绝。
+_UNSAFE_ID_CHARS = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def _make_stream_id(file_path: str) -> str:
+    """生成跨实现兼容的 stream_id，长度控制在 128 字符白名单内。"""
+    stem = Path(file_path).stem
+    safe = _UNSAFE_ID_CHARS.sub("_", stem)[:80] or "file"
+    # 毫秒时间戳：同一秒内两个同名任务不会复用同一个 stream_id
+    return f"jmdown_{int(time.time() * 1000)}_{safe}"
 
 
 def _find_qq_adapter(adapter_mgr):
@@ -32,9 +72,7 @@ def _find_qq_adapter(adapter_mgr):
     adapters = adapter_mgr.get_adapters()
     for name, inst in adapters.items():
         if getattr(inst, "info", None) and inst.info.platform.upper() == "QQ":
-            logger.info(
-                f"Found QQ adapter: name={name!r}, platform={inst.info.platform!r}"
-            )
+            logger.info(f"Found QQ adapter: name={name!r}, platform={inst.info.platform!r}")
             return inst
     logger.warning(
         f"QQ adapter not found. Available: "
@@ -50,26 +88,24 @@ async def stream_upload_file(
     progress_cb=None,
     chunk_size: int = 512 * 1024,
 ) -> str:
-    """upload_file_stream: 分片上传 → 返回 NapCat 远端 temp 路径.
+    """upload_file_stream: 分片上传 → 返回实现端远端 temp 路径.
 
-    client: NapCatWebSocketClient 实例（已有 WS 连接）
+    client: OneBot WS 客户端实例（已有 WS 连接）
     file_path: 本地 PDF 绝对路径
     timeout: 单次 send_action 超时
-    progress_cb: async callable(pct: int, speed_str: str) 每 25% 回调
-    chunk_size: 分片大小, 默认 512KB, NapCat 帧上限 16MB
+    progress_cb: async callable(pct: int | None, note: str)，分片期间给真实百分比
+    chunk_size: 分片大小, 默认 512KB（单片上限由 main._load_config 控制）
     """
     file_size = os.path.getsize(file_path)
     total_chunks = (file_size + chunk_size - 1) // chunk_size
-    stream_id = f"jmdown_{int(time.time())}_{os.path.basename(file_path)}"
+    stream_id = _make_stream_id(file_path)
 
-    logger.info(
-        f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})"
-    )
+    logger.info(f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})")
 
     # expected_sha256 必须为完整文件 hash, 所有分片传同一个值
     # 分块读 + 丢线程, 避免一次性读入大文件并阻塞事件循环
     full_sha256 = await asyncio.to_thread(_sha256_file, file_path)
-    remote_path: Optional[str] = None
+    remote_path: str | None = None
     t0 = time.time()
     report_every = max(1, total_chunks // 20)  # 约 20 次通知
 
@@ -88,47 +124,35 @@ async def stream_upload_file(
                 "filename": os.path.basename(file_path),
             }
 
-            resp = await client.send_action(
-                "upload_file_stream", params, timeout=timeout
-            )
-            status = resp.get("status", "")
-            if status != "ok":
-                raise RuntimeError(
-                    f"Stream chunk {i + 1}/{total_chunks} failed: "
-                    f"status={status} data={resp.get('data', {})}"
-                )
+            stage = f"分片 {i + 1}/{total_chunks}"
+            resp = await _call_action(client, "upload_file_stream", params, timeout, stage=stage, size_bytes=file_size)
+            if not is_ok_response(resp):
+                raise FileSendError(format_action_failure("upload_file_stream", resp, stage=stage))
 
             # 报告进度（用全程平均速度，单chunk瞬时速度未使用）
-            if progress_cb and (
-                i == 0 or i == total_chunks - 1 or i % report_every == 0
-            ):
+            if progress_cb and (i == 0 or i == total_chunks - 1 or i % report_every == 0):
                 pct = min(int((i + 1) / total_chunks * 100), 100)
                 elapsed = time.time() - t0
                 avg_speed = (chunk_size * (i + 1)) / elapsed if elapsed > 0 else 0
                 speed_str = _fmt(avg_speed) + "/s"
                 await progress_cb(pct, speed_str)
 
-    # ── 所有块发送完成，通知 NapCat 组装文件 ──
+    # ── 所有块发送完成，通知实现端组装文件 ──
     logger.info("All chunks sent, signaling completion ...")
-    complete_resp = await client.send_action(
+    complete_resp = await _call_action(
+        client,
         "upload_file_stream",
-        {
-            "stream_id": stream_id,
-            "is_complete": True,
-        },
-        timeout=timeout,
+        {"stream_id": stream_id, "is_complete": True},
+        timeout,
+        stage="分片完成确认",
+        size_bytes=file_size,
     )
-    status = complete_resp.get("status", "")
-    if status != "ok":
-        raise RuntimeError(
-            f"Stream completion signal failed: "
-            f"status={status} data={complete_resp.get('data', {})}"
-        )
+    if not is_ok_response(complete_resp):
+        raise FileSendError(format_action_failure("upload_file_stream", complete_resp, stage="分片完成确认"))
     remote_path = complete_resp.get("data", {}).get("file_path", "")
     if not remote_path:
-        raise RuntimeError(
-            f"Stream completed but no file_path in response: "
-            f"{json.dumps(complete_resp, ensure_ascii=False)}"
+        raise FileSendError(
+            f"分片完成确认失败：实现端响应中缺少 file_path（{response_summary(complete_resp)}）。{diagnosis_hint()}"
         )
 
     return remote_path
@@ -140,20 +164,21 @@ async def send_file_via_stream(
     user_id: str,
     file_path: str,
     is_group: bool = False,
-    group_id: Optional[str] = None,
+    group_id: str | None = None,
     timeout: int = 300,
-    send_timeout: Optional[int] = None,
+    send_timeout: int | None = None,
     progress_cb=None,
     chunk_size: int = 512 * 1024,
 ) -> str:
     """完整链路: stream upload → upload_private_file / upload_group_file.
 
     返回人类可读的结果文本。
-    progress_cb: async callable(pct: int) for upload progress.
+    progress_cb: async callable(pct: int | None, note: str). ``int`` 是真实分片
+        百分比；``None`` 表示「实现端发送中，进度未知」。
     chunk_size: 分片大小, 默认 512KB.
     timeout: 单个分片 send_action 超时（每片 512KB，秒级即可完成）.
     send_timeout: 发送 API（upload_private_file/upload_group_file）超时。
-        NapCat 处理大文件发送（temp 转存 → QQ 服务器）可能远超分片超时，
+        实现端处理大文件发送（temp 转存 → QQ 服务器）可能远超分片超时，
         若沿用 timeout 会把已成功的发送误判为超时。默认取 timeout 值。
     """
     # 动态查找 platform=QQ 的 adapter，不硬编码注册名
@@ -162,37 +187,30 @@ async def send_file_via_stream(
         raise NapCatConfigError("QQ 适配器不可用，无法流传输")
     client = adapter.get_client()
     if client is None:
-        raise NapCatConfigError("NapCat 客户端未初始化")
+        raise NapCatConfigError("QQ 客户端未初始化")
     file_name = os.path.basename(file_path)
 
-    # 1. 分片上传到 NapCat temp
-    remote_path = await stream_upload_file(
-        client, file_path, timeout, progress_cb, chunk_size
-    )
+    # 1. 分片上传到实现端 temp
+    remote_path = await stream_upload_file(client, file_path, timeout, progress_cb, chunk_size)
     file_size = os.path.getsize(file_path)
     logger.info(f"Stream upload OK: {file_name} ({_fmt(file_size)}) → {remote_path}")
 
-    # 2. 从 NapCat temp 发给目标用户（发送 API 用独立的 send_timeout，
+    # 2. 用实现端 temp 路径发给目标用户（发送 API 用独立的 send_timeout，
     #    避免大文件发送处理超时被误判为失败）
+    #    这一阶段实现端内部转存，协议不回报进度，不能继续挂在 100%
+    if progress_cb:
+        await progress_cb(None, "实现端发送中")
     send_to = send_timeout if send_timeout is not None else timeout
     if is_group and group_id:
-        resp = await client.send_action(
-            "upload_group_file",
-            {"group_id": group_id, "file": remote_path, "name": file_name},
-            timeout=send_to,
-        )
+        action = "upload_group_file"
+        params = {"group_id": group_id, "file": remote_path, "name": file_name}
     else:
-        resp = await client.send_action(
-            "upload_private_file",
-            {"user_id": user_id, "file": remote_path, "name": file_name},
-            timeout=send_to,
-        )
+        action = "upload_private_file"
+        params = {"user_id": user_id, "file": remote_path, "name": file_name}
+    resp = await _call_action(client, action, params, send_to, stage="实现端发送", size_bytes=file_size)
 
-    status = resp.get("status", "")
-    if status != "ok":
-        raise RuntimeError(
-            f"Send file failed: status={status} data={resp.get('data', {})}"
-        )
+    if not is_ok_response(resp):
+        raise FileSendError(format_action_failure(action, resp, stage="实现端发送"))
 
     logger.info(f"File sent to {user_id}: {file_name}")
     return f"已通过流传输发送 ({_fmt(file_size)})"

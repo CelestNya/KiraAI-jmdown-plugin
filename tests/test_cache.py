@@ -1,11 +1,8 @@
-"""
-CacheIndex 单元测试 — 覆盖 _load_error 属性存在性 + getattr 防御兜底 +
-__pycache__ 清理逻辑（对应 #11 bug 修复）。
+"""CacheIndex 单元测试 —— 覆盖 _load_error 属性存在性、getattr 防御兜底
+以及 __pycache__ 清理逻辑（对应 #11 bug 修复）。
 
 Run:
-    python -m pytest tests/test_cache.py -v
-    # or
-    python -m unittest tests.test_cache -v
+    pytest tests/test_cache.py -v
 """
 
 from __future__ import annotations
@@ -15,10 +12,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# ── 被测模块 ──
-import sys
+import _core_stub
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_core_stub.bootstrap()
+
 from cache import CacheEntry, CacheIndex
 
 
@@ -39,18 +36,31 @@ class CacheIndexLoadErrorTest(unittest.TestCase):
     def test_index_file_not_exist(self):
         """索引文件不存在 → _load_error=False, _entries=[]"""
         ci = CacheIndex(self.index_path, max_entries=5)
-        self.assertTrue(hasattr(ci, "_load_error"),
-                        "CacheIndex 必须有 _load_error 属性")
+        self.assertTrue(hasattr(ci, "_load_error"), "CacheIndex 必须有 _load_error 属性")
         self.assertFalse(ci._load_error)
         self.assertEqual(ci.list_all(), [])
 
     def test_valid_json(self):
         """合法的 JSON 索引文件 → _load_error=False, 条目正确加载"""
         entries = [
-            {"album_id": 1, "title": "t1", "description": "", "page_count": 10,
-             "pdf_path": "/x/1.pdf", "size_bytes": 1000, "downloaded_at": 100.0},
-            {"album_id": 2, "title": "t2", "description": "", "page_count": 20,
-             "pdf_path": "/x/2.pdf", "size_bytes": 2000, "downloaded_at": 200.0},
+            {
+                "album_id": 1,
+                "title": "t1",
+                "description": "",
+                "page_count": 10,
+                "pdf_path": "/x/1.pdf",
+                "size_bytes": 1000,
+                "downloaded_at": 100.0,
+            },
+            {
+                "album_id": 2,
+                "title": "t2",
+                "description": "",
+                "page_count": 20,
+                "pdf_path": "/x/2.pdf",
+                "size_bytes": 2000,
+                "downloaded_at": 200.0,
+            },
         ]
         self.index_path.write_text(json.dumps(entries), "utf-8")
 
@@ -67,8 +77,7 @@ class CacheIndexLoadErrorTest(unittest.TestCase):
         self.index_path.write_text("这不是 JSON", "utf-8")
 
         ci = CacheIndex(self.index_path, max_entries=5)
-        self.assertTrue(ci._load_error,
-                        "损坏 JSON 时应设 _load_error=True")
+        self.assertTrue(ci._load_error, "损坏 JSON 时应设 _load_error=True")
         self.assertEqual(ci.list_all(), [])
 
     def test_empty_file(self):
@@ -81,9 +90,16 @@ class CacheIndexLoadErrorTest(unittest.TestCase):
     def test_field_whitelist_drops_unknown(self):
         """未知字段应被字段白名单过滤，不触发 _load_error"""
         entries = [
-            {"album_id": 1, "title": "t1", "description": "", "page_count": 10,
-             "pdf_path": "/x/1.pdf", "size_bytes": 1000, "downloaded_at": 100.0,
-             "malicious_injection": "evil"},
+            {
+                "album_id": 1,
+                "title": "t1",
+                "description": "",
+                "page_count": 10,
+                "pdf_path": "/x/1.pdf",
+                "size_bytes": 1000,
+                "downloaded_at": 100.0,
+                "malicious_injection": "evil",
+            },
         ]
         self.index_path.write_text(json.dumps(entries), "utf-8")
 
@@ -111,9 +127,15 @@ class CacheIndexLoadErrorTest(unittest.TestCase):
         ci = CacheIndex(self.index_path, max_entries=5)
         self.assertTrue(ci._load_error)
 
-        entry = CacheEntry(album_id=99, title="new", description="",
-                           page_count=5, pdf_path="/x/99.pdf",
-                           size_bytes=500, downloaded_at=300.0)
+        entry = CacheEntry(
+            album_id=99,
+            title="new",
+            description="",
+            page_count=5,
+            pdf_path="/x/99.pdf",
+            size_bytes=500,
+            downloaded_at=300.0,
+        )
         evicted = ci.put(entry)
         self.assertEqual(evicted, [])
         self.assertEqual(len(ci.list_all()), 1)
@@ -123,9 +145,15 @@ class CacheIndexLoadErrorTest(unittest.TestCase):
         """超出 max_entries 时淘汰最旧条目"""
         ci = CacheIndex(self.index_path, max_entries=3)
         for i in range(5):
-            entry = CacheEntry(album_id=i, title=f"t{i}", description="",
-                               page_count=10, pdf_path=f"/x/{i}.pdf",
-                               size_bytes=1000, downloaded_at=float(i))
+            entry = CacheEntry(
+                album_id=i,
+                title=f"t{i}",
+                description="",
+                page_count=10,
+                pdf_path=f"/x/{i}.pdf",
+                size_bytes=1000,
+                downloaded_at=float(i),
+            )
             ci.put(entry)
 
         self.assertEqual(len(ci.list_all()), 3)
@@ -136,9 +164,15 @@ class CacheIndexLoadErrorTest(unittest.TestCase):
         """put 同一 album_id 应更新而非重复"""
         ci = CacheIndex(self.index_path, max_entries=5)
         for i in range(2):
-            entry = CacheEntry(album_id=1, title=f"v{i}", description="",
-                               page_count=10, pdf_path="/x/1.pdf",
-                               size_bytes=1000, downloaded_at=float(i))
+            entry = CacheEntry(
+                album_id=1,
+                title=f"v{i}",
+                description="",
+                page_count=10,
+                pdf_path="/x/1.pdf",
+                size_bytes=1000,
+                downloaded_at=float(i),
+            )
             ci.put(entry)
 
         self.assertEqual(len(ci.list_all()), 1)
@@ -150,6 +184,7 @@ class GetattrDefensiveFallbackTest(unittest.TestCase):
 
     class OldCacheIndex:
         """模拟旧版 CacheIndex（没有 _load_error 属性）"""
+
         def __init__(self):
             self._entries = []
 
@@ -164,6 +199,7 @@ class GetattrDefensiveFallbackTest(unittest.TestCase):
 
     class NewCacheIndex:
         """模拟新版 CacheIndex（有 _load_error 属性）"""
+
         def __init__(self):
             self._entries = []
             self._load_error = False
@@ -251,8 +287,7 @@ class PycacheCleanupTest(unittest.TestCase):
             except OSError:
                 pass
 
-        self.assertFalse(self.pycache_dir.exists(),
-                         "空的 __pycache__ 目录应被删除")
+        self.assertFalse(self.pycache_dir.exists(), "空的 __pycache__ 目录应被删除")
 
     def test_keeps_pycache_dir_if_non_pyc_remains(self):
         """__pycache__ 还有非 .pyc 文件 → rmdir 抛 OSError → 静默忽略"""
@@ -268,8 +303,7 @@ class PycacheCleanupTest(unittest.TestCase):
             except OSError:
                 pass
 
-        self.assertTrue(self.pycache_dir.exists(),
-                        "非空 __pycache__ 应保留")
+        self.assertTrue(self.pycache_dir.exists(), "非空 __pycache__ 应保留")
 
     def test_no_pycache_dir_is_noop(self):
         """没有 __pycache__ 目录 → 不做任何操作，不抛异常"""

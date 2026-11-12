@@ -1,0 +1,11 @@
+# 仓库历史里出现过 CRLF / LF 混用（dev 分支的 .py 是 CRLF，master 是 LF），
+# 导致同一份代码在分支间比对时整文件重写。统一按 LF 入库，二进制不受影响。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary

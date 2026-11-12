@@ -20,6 +20,14 @@ Python 项目（含 `.py` 文件）的附加规范。固化在此文件，不依
 - 已有仓库：有 `uv.lock`/`[tool.uv]` 直接 `uv sync`；只有 requirements/poetry/conda 的，先提议迁移到 uv 再动手
 - 一次性脚本：`uv run --with <pkg> python script.py`（PEP 723 内联依赖）
 
+**本仓库例外（优先级高于上面各条）：** 这是 KiraAI 插件，运行在 KiraAI 自己的
+venv（`<KiraAI>/venv`）里，跟着宿主走。因此：
+
+- 禁止为插件另建 venv，也禁止引入 `uv.lock`
+- 依赖只维护 `requirements.txt`（`core/plugin/plugin_installer.py` 读的就是它）
+- 运行 Python 用宿主解释器：`../../../venv/Scripts/python.exe`（Windows）/
+  `../../../venv/bin/python`（POSIX）
+
 ---
 
 ## PY02 全员类型注解
@@ -84,11 +92,14 @@ Python 项目（含 `.py` 文件）的附加规范。固化在此文件，不依
 
 ## PY08 pyright 依赖环境
 
-pyright 需要正确的 Python 环境才能解析导入。依赖不在当前项目时，找同级或上级 `KiraAI-src/`：
+pyright 需要正确的 Python 环境才能解析导入。本仓库没有 `pyproject.toml`，
+依赖装在 KiraAI 的 venv 里：
 
-- `KiraAI-jmdown-plugin/` 无 `pyproject.toml` → 自动用 `../KiraAI-src/` 的 uv 环境
-- `KiraAI-src/` 有 `pyproject.toml` 和完整依赖 → 作为项目根
-- 其他布局：上溯目录树找最近的 `pyproject.toml` / `uv.lock`
+- 插件目录：`<KiraAI>/data/plugins/jmdown`
+- 解释器：`<KiraAI>/venv`（Windows `venv/Scripts/python.exe`，POSIX `venv/bin/python`）
+- 类型检查：`cd <KiraAI> && pyright data/plugins/jmdown/main.py`（在 KiraAI 根执行，
+  pyright 才能顺着 `core/` 解析框架导入）
+- 插件不在 KiraAI 目录树内时：设置 `KIRAAI_ROOT`，或用 `--pythonpath` 指向该 venv
 
 ---
 
@@ -106,25 +117,20 @@ pyright 需要正确的 Python 环境才能解析导入。依赖不在当前项�
    ```
    不通过则修复后再继续。
 
-2. **pyright 类型检查改动的文件**（依赖 KiraAI-src 环境）：
+2. **pyright 类型检查改动的文件**（依赖 KiraAI 的 venv）：
    ```bash
-   cd <项目根> && pyright <改动的文件...>
+   cd <KiraAI> && pyright data/plugins/jmdown/<改动的文件...>
    ```
-   如果文件在 `KiraAI-jmdown-plugin/` 下，先 `cd ../KiraAI-src` 让 pyright 找到依赖。
    过滤 `reportMissingImports` 和 `reportOptional*` 类已知预存错误。
 
-3. **unittest / pytest 跑测试**：
+3. **pytest 跑测试**（在插件根目录，测试自带 core 桩，不需要 KiraAI 运行时）：
    ```bash
-   uv run python -m unittest discover -v
-   ```
-   或
-   ```bash
-   uv run pytest -q
+   ../../../venv/Scripts/python.exe -m pytest -q
    ```
 
 4. **Python 语法检查**（只编译不导入）：
    ```bash
-   uv run python -m py_compile <文件>
+   ../../../venv/Scripts/python.exe -m py_compile <文件>
    ```
 
 全部通过后再结束本轮。若有失败，修复后重跑。

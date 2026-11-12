@@ -15,24 +15,58 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
-import jmcomic
-from jmcomic.jm_config import JmModuleConfig
-from PIL import Image
 import img2pdf
-
-from core.plugin import BasePlugin, PluginContext, register_tool as tool, logger
+import jmcomic
 from core.chat.message_elements import Text
 from core.chat.message_utils import MessageChain
+from core.plugin import BasePlugin, PluginContext, logger
+from core.plugin import register_tool as tool
+from jmcomic.jm_config import JmModuleConfig
+from PIL import Image
 
 from .cache import CacheEntry, CacheIndex
+from .impl_support import DEFAULT_UPLOAD_METHOD, UPLOAD_METHODS, diagnosis_hint, format_no_response
 
 
 class JMDownError(RuntimeError):
     """JMdown 插件自定义错误"""
 
     pass
+
+
+def _resolve_upload_method(raw, upload: dict, flat: dict) -> str:
+    """解析三选一配置，并把旧版「开关 + 载荷」配置迁移过来。
+
+    ``auto`` 已移除：旧值一律落到默认方案并明确告警，避免跨机部署时
+    静默从 base64 退化成路径直传、最后只得到一个远端「文件不存在」。
+    """
+    if raw is not None and raw not in UPLOAD_METHODS:
+        logger.warning(f"upload_method={raw!r} 非法，回退 {DEFAULT_UPLOAD_METHOD}")
+        raw = None
+    if raw is not None:
+        return raw
+
+    legacy_stream = upload.get("use_napcat_stream", flat.get("use_napcat_stream", False))
+    legacy_payload = upload.get("file_payload", flat.get("file_payload", ""))
+    if not legacy_stream and not legacy_payload:
+        return DEFAULT_UPLOAD_METHOD
+
+    logger.warning("检测到旧上传配置（use_napcat_stream / file_payload），已迁移到 upload_method")
+    if bool(legacy_stream):
+        return "stream"
+    if legacy_payload in ("path", "base64"):
+        return legacy_payload
+    logger.warning(
+        f"旧配置 file_payload={legacy_payload!r} 已移除，按 {DEFAULT_UPLOAD_METHOD} 处理；"
+        "跨机部署请在 WebUI 显式选择 base64 或 stream"
+    )
+    return DEFAULT_UPLOAD_METHOD
+
+
+def _upload_phase(pct: int | None, note: str) -> str:
+    """进度回调 → 状态文本。无真实百分比时写「进度未知」，不伪造 0%。"""
+    return "进度未知" if pct is None else f"{pct}% ({note})"
 
 
 @dataclass
@@ -51,13 +85,13 @@ class TaskState:
             "发送": "排队中",
         }
     )
-    result: Optional[dict] = None
-    error: Optional[str] = None
+    result: dict | None = None
+    error: str | None = None
     started_at: float = field(default_factory=time.time)
     elapsed: float = 0.0
 
 
-def _parse_target(target: str) -> tuple[str, bool, Optional[str]]:
+def _parse_target(target: str) -> tuple[str, bool, str | None]:
     """解析目标会话标识 → (user_id, is_group, group_id)
 
     格式: adapter:type:id
@@ -84,7 +118,8 @@ def _fetch_album_meta(album_id: int) -> dict:
         client = jmcomic.JmOption.default().build_jm_client()
         album = client.get_album_detail(album_id)
     except jmcomic.jm_exception.MissingAlbumPhotoException:
-        raise JMDownError("该号码对应的本子不存在")
+        # from None：底层异常对调用方无意义，只需要「本子不存在」这个业务结论
+        raise JMDownError("该号码对应的本子不存在") from None
     except Exception as e:
         raise JMDownError(f"查询失败: {e}") from e
 
@@ -174,9 +209,7 @@ def _search_albums(
 # ── 下载 & PDF ──
 
 
-def _download_images(
-    album_id: int, download_dir: Path, threads: int = 45, *, progress_cb=None
-) -> tuple:
+def _download_images(album_id: int, download_dir: Path, threads: int = 45, *, progress_cb=None) -> tuple:
     """下载图片, 返回 (album_obj, image_dir, images[], title, desc).
 
     progress_cb: callable(pct: int) 每下载一张回调一次.
@@ -199,16 +232,14 @@ def _download_images(
         client = opt.build_jm_client()
         album_detail = client.get_album_detail(album_id)
     except jmcomic.jm_exception.MissingAlbumPhotoException:
-        raise JMDownError("该号码对应的本子不存在")
+        raise JMDownError("该号码对应的本子不存在") from None
     except Exception as e:
         raise JMDownError(f"获取本子信息失败: {e}") from e
 
     # 注册下载进度插件
     total_pages = 0
     try:
-        first_pid = (
-            album_detail.episode_list[0][0] if album_detail.episode_list else None
-        )
+        first_pid = album_detail.episode_list[0][0] if album_detail.episode_list else None
         if first_pid:
             photo = client.get_photo_detail(int(first_pid))
             total_pages = len(photo) if hasattr(photo, "__len__") else 0
@@ -216,9 +247,7 @@ def _download_images(
         pass
     _dl_info = {"n": 0, "total": total_pages, "t0": time.time(), "cb": progress_cb}
     if progress_cb and total_pages > 0:
-        opt.plugins.after_photo = [
-            {"plugin": "_jmdown_pct", "kwargs": {"info": _dl_info}}
-        ]
+        opt.plugins.after_photo = [{"plugin": "_jmdown_pct", "kwargs": {"info": _dl_info}}]
 
     # 用 download_photo 只下单章（不下挂载章节），避免覆盖
     try:
@@ -240,9 +269,7 @@ def _download_images(
     valid = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
     expected_stems = {Path(p).stem for p in (photo_detail.page_arr or [])}
     images = sorted(
-        p
-        for p in image_dir.rglob("*")
-        if p.is_file() and p.suffix.lower() in valid and p.stem in expected_stems
+        p for p in image_dir.rglob("*") if p.is_file() and p.suffix.lower() in valid and p.stem in expected_stems
     )
     expected = len(expected_stems)
     if expected > 0 and len(images) != expected:
@@ -253,9 +280,7 @@ def _download_images(
     return album_detail, image_dir, images, title, description
 
 
-def _images_to_pdf(
-    images: list[Path], output_path: Path, quality: int = 85, progress_cb=None
-) -> int:
+def _images_to_pdf(images: list[Path], output_path: Path, quality: int = 85, progress_cb=None) -> int:
     """图片合 PDF, 返回字节数. 非 JPEG 先转 JPEG.
     progress_cb: callable(pct: int) 每 20% 回调.
     """
@@ -269,9 +294,7 @@ def _images_to_pdf(
                 final.append(p)
             else:
                 tmp = p.with_name(p.stem + ".jm_tmp.jpg")
-                Image.open(p).convert("RGB").save(
-                    tmp, "JPEG", quality=quality, optimize=True
-                )
+                Image.open(p).convert("RGB").save(tmp, "JPEG", quality=quality, optimize=True)
                 final.append(tmp)
                 temps.append(tmp)
             if progress_cb:
@@ -280,9 +303,7 @@ def _images_to_pdf(
                 if report > last_report:
                     last_report = report
                     progress_cb(min(pct, 100))
-        pdf_data = img2pdf.convert(
-            *[str(p) for p in final], producer="kira-jmdown", creator="kira-jmdown"
-        )
+        pdf_data = img2pdf.convert(*[str(p) for p in final], producer="kira-jmdown", creator="kira-jmdown")
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(pdf_data)
         return output_path.stat().st_size
@@ -351,9 +372,7 @@ def _create_zip(pdf_path: Path, zip_path: Path, password: str = "") -> int:
     import pyzipper
 
     if password:
-        with pyzipper.AESZipFile(
-            zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES
-        ) as zf:
+        with pyzipper.AESZipFile(zip_path, "w", compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
             zf.setpassword(password.encode("utf-8"))
             zf.write(pdf_path, pdf_path.name)
     else:
@@ -386,14 +405,15 @@ class JMdownPlugin(BasePlugin):
     def __init__(self, ctx: PluginContext, cfg: dict):
         super().__init__(ctx, cfg)
         self._phase_lock = threading.Lock()
-        self._data_dir: Optional[Path] = None
-        self._download_dir: Optional[Path] = None
-        self._cache_dir: Optional[Path] = None
-        self._cache: Optional[CacheIndex] = None
+        self._data_dir: Path | None = None
+        self._download_dir: Path | None = None
+        self._cache_dir: Path | None = None
+        self._cache: CacheIndex | None = None
         self._max_cache: int = 10
         self._pdf_quality: int = 85
         self._upload_timeout: int = 300
         self._chunk_size: int = 512 * 1024
+        self._upload_method: str = DEFAULT_UPLOAD_METHOD
         self._allow_cross_session: bool = False
 
         # 后台任务系统
@@ -404,14 +424,10 @@ class JMdownPlugin(BasePlugin):
         self._bg_tasks: set[asyncio.Task] = set()
 
     # 所有涉及 job_id 的工具返回值追加此提示，防止 LLM 向用户暴露内部标识
-    _INSTRUCTION_NOTE = (
-        '---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
-    )
+    _INSTRUCTION_NOTE = '---\n注: 不要向用户输出格式化文本或"系统通知"，内部任务号(JOB-xxx)也不要提及'
 
     async def initialize(self):
-        self._data_dir = self.ctx.get_plugin_data_dir() or Path(
-            "data/plugin_data/jmdown"
-        )
+        self._data_dir = self.ctx.get_plugin_data_dir() or Path("data/plugin_data/jmdown")
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._download_dir = self._data_dir / "downloads"
         self._download_dir.mkdir(exist_ok=True)
@@ -424,7 +440,10 @@ class JMdownPlugin(BasePlugin):
             self._clean_orphans()
 
         # content_query=false 时：block_content_tools=true 不注册，false 仅拦截
-        from core.plugin.plugin_registry import _plugin_components
+        try:
+            from core.plugin.registry import _plugin_components
+        except ImportError:  # 旧版核心路径兜底
+            from core.plugin.plugin_registry import _plugin_components
 
         pid = self.ctx.plugin_mgr.get_plugin_id_for_module(__name__)
         comp = _plugin_components.get(pid)
@@ -448,10 +467,7 @@ class JMdownPlugin(BasePlugin):
         ):
             # content_query=true 或 block=false → 恢复工具（block=false 时保留工具仅拦截）
             for name in ("query_jm_album", "search_jm_album"):
-                if (
-                    name not in comp.tools
-                    and name in self.__class__._hidden_tool_backup
-                ):
+                if name not in comp.tools and name in self.__class__._hidden_tool_backup:
                     bk = self.__class__._hidden_tool_backup[name]
                     comp.tools[name] = bk["def"]
                     comp.tool_funcs[name] = bk["func"]
@@ -493,21 +509,21 @@ class JMdownPlugin(BasePlugin):
         self._download_threads = max(1, int(_g(dl, "download_threads", 45)))
         self._upload_timeout = max(1, int(_g(upload, "upload_timeout", 300)))
         self._chunk_size = min(
-            16 * 1024 * 1024,  # NapCat WS 帧上限
+            16 * 1024 * 1024,  # 单片上限：避免单帧过大，不是文件大小闸门
             max(4096, int(_g(upload, "chunk_size", 512 * 1024))),
         )
         self._notify_llm = bool(_g(notification, "notify_llm", True))
         self._content_query = bool(_g(content, "content_query", False))
         self._block_content_tools = bool(_g(content, "block_content_tools", True))
         self._allow_cross_session = bool(_g(content, "allow_cross_session", False))
+        # 三选一：path / base64 走通用扩展动作，stream 走分片（仅 NapCat / SnowLuma）
+        self._upload_method = _resolve_upload_method(_g(upload, "upload_method", None), upload, self.plugin_cfg)
         self._zip_encrypt = bool(_g(encryption, "zip_encrypt", False))
         if self._zip_encrypt:
             try:
                 import pyzipper  # noqa: F401
-            except ImportError:
-                raise RuntimeError(
-                    "zip_encrypt=True 但 pyzipper 未安装：pip install pyzipper>=0.4"
-                )
+            except ImportError as e:
+                raise RuntimeError("zip_encrypt=True 但 pyzipper 未安装：pip install 'pyzipper>=0.4'") from e
         self._custom_password = str(_g(encryption, "custom_password", ""))
         self._max_concurrent = max(1, int(_g(dl, "max_concurrent", 2)))
 
@@ -527,22 +543,68 @@ class JMdownPlugin(BasePlugin):
         logger.info("JMdown 已终止")
 
     async def _upload_with_watchdog(self, upload_coro, timeout: int) -> str:
-        """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。"""
+        """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。
+
+        内层超时若已带动作名等信息就保留原文，只补上诊断指引；空消息则换成
+        带方案名与超时秒数的完整说明，避免 LLM 收到空白失败原因。
+        """
         try:
             return await asyncio.wait_for(upload_coro, timeout=timeout)
         except TimeoutError as e:
-            # 保留 send_action 的原始超时信息（含 API 名），便于区分
-            # 分片上传超时与发送阶段超时
-            raise TimeoutError(f"上传超时: {e}") from e
+            original = str(e).strip()
+            detail = (
+                f"{original} {diagnosis_hint()}"
+                if original
+                else format_no_response(f"{self._upload_method} 方案", timeout, stage="上传总看门狗")
+            )
+            raise TimeoutError(detail) from e
+
+    async def _deliver(self, sid, user_id, is_group, group_id, upload_path, progress_cb) -> str:
+        """按 upload_method 在三种方案间分派。
+
+        path / base64 走同一组标准动作（区别只在 file 参数形态），stream 走分片。
+        任务流程不该知道这些细节，调用方只关心进度回调与结果文本。
+        """
+        file_path = str(Path(upload_path).resolve())
+        ul_timeout = self._upload_timeout + 120
+
+        if self._upload_method == "stream":
+            from .napcat_stream import send_file_via_stream
+
+            coro = send_file_via_stream(
+                self.ctx,
+                sid,
+                user_id,
+                file_path,
+                is_group,
+                group_id,
+                max(10, self._upload_timeout // 10),
+                progress_cb=progress_cb,
+                chunk_size=self._chunk_size,
+                send_timeout=ul_timeout,
+            )
+        else:
+            from .file_send import send_file_standard
+
+            coro = send_file_standard(
+                self.ctx,
+                user_id,
+                file_path,
+                is_group=is_group,
+                group_id=group_id,
+                timeout=ul_timeout,
+                progress_cb=progress_cb,
+                payload_mode=self._upload_method,
+            )
+
+        return await self._upload_with_watchdog(coro, timeout=ul_timeout)
 
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
         """通过会话发送进度通知。mentioned=True 会触发目标会话 LLM 回复。"""
         if not sid:
             return
         try:
-            await self.ctx.publish_notice(
-                sid, MessageChain([Text(text)]), is_mentioned=mentioned
-            )
+            await self.ctx.publish_notice(sid, MessageChain([Text(text)]), is_mentioned=mentioned)
         except Exception:
             pass  # 通知失败不中断主流程
 
@@ -582,10 +644,7 @@ class JMdownPlugin(BasePlugin):
 
         # 全局并发限制
         if len(self._running_tasks) >= self._max_concurrent:
-            return (
-                f"当前下载任务过多（{len(self._running_tasks)}/{self._max_concurrent}），"
-                "请等待现有任务完成后再试"
-            )
+            return f"当前下载任务过多（{len(self._running_tasks)}/{self._max_concurrent}），请等待现有任务完成后再试"
 
         # 去重: 同一 album_id 正在运行则复用
         # 超过 upload_timeout+120s 视为死任务，允许覆盖
@@ -605,11 +664,7 @@ class JMdownPlugin(BasePlugin):
                 # 死任务，fallthrough 到重新提交
             else:
                 existing = next(
-                    (
-                        s
-                        for s in self._task_registry.values()
-                        if s.album_id == album_id and s.status == "running"
-                    ),
+                    (s for s in self._task_registry.values() if s.album_id == album_id and s.status == "running"),
                     None,
                 )
                 if existing:
@@ -626,11 +681,7 @@ class JMdownPlugin(BasePlugin):
 
         # 跨会话转发校验
         session = _event.session
-        if (
-            session is not None
-            and target != session.sid
-            and not self._allow_cross_session
-        ):
+        if session is not None and target != session.sid and not self._allow_cross_session:
             return f"错误: 不允许转发到其他会话（当前: {session.sid}，目标: {target}）"
 
         # 预查本子是否存在，10s 超时兜底（网络波动 fallthrough 到后台任务）
@@ -683,9 +734,7 @@ class JMdownPlugin(BasePlugin):
         "查询禁漫本子元信息（标题、页数、作者、标签等），不下载内容。适用于了解本子基本资料",
         {
             "type": "object",
-            "properties": {
-                "album_id": {"type": "integer", "description": "禁漫本子数字 ID"}
-            },
+            "properties": {"album_id": {"type": "integer", "description": "禁漫本子数字 ID"}},
             "required": ["album_id"],
         },
     )
@@ -776,9 +825,7 @@ class JMdownPlugin(BasePlugin):
             lines.append(f"...还有 {len(results) - limit} 条未显示")
         # 只在第一页加提示
         if page == 1:
-            lines.append(
-                "---\n注: 可用 query_jm_album 查看详情, send_jm_album 下载, 翻页请指定 page 参数"
-            )
+            lines.append("---\n注: 可用 query_jm_album 查看详情, send_jm_album 下载, 翻页请指定 page 参数")
         result = "\n".join(lines)
         logger.debug(f"search_jm_album -> {len(result)} chars, {total} total results")
         return result
@@ -798,17 +845,13 @@ class JMdownPlugin(BasePlugin):
             lines.append(f"作者: {', '.join(authors)}")
         tags = info.get("tags", [])
         if tags:
-            lines.append(
-                f"标签: {', '.join(tags[:10])}{'...' if len(tags) > 10 else ''}"
-            )
+            lines.append(f"标签: {', '.join(tags[:10])}{'...' if len(tags) > 10 else ''}")
         pc = info.get("page_count", 0)
         ep = info.get("episode_count", 0)
         lines.append(f"页数: {pc if pc > 0 else '未知'}  章节: {ep}")
         linked = info.get("linked_episodes", [])
         if linked:
-            ep_info = "  |  ".join(
-                f"#{e['id']} ({e.get('title', '') or '?'})" for e in linked
-            )
+            ep_info = "  |  ".join(f"#{e['id']} ({e.get('title', '') or '?'})" for e in linked)
             lines.append(f"挂载章节: {ep_info}")
             lines.append("(这些是作为该本子章节挂载的其他本子号，如有需要可单独下载)")
         if info.get("likes") or info.get("views"):
@@ -840,11 +883,7 @@ class JMdownPlugin(BasePlugin):
             if len(desc) > ml:
                 desc = desc[:ml] + "..."
             linked = r.get("linked_episodes", [])
-            ep_str = (
-                ("  挂载: " + ", ".join(f"#{e['id']}" for e in linked))
-                if linked
-                else ""
-            )
+            ep_str = ("  挂载: " + ", ".join(f"#{e['id']}" for e in linked)) if linked else ""
             lines.extend(
                 [
                     f"标题: {r.get('title', '')}",
@@ -874,41 +913,21 @@ class JMdownPlugin(BasePlugin):
             if cached and Path(cached.pdf_path).exists():
                 state.phases["下载"] = "缓存"
                 state.phases["合成"] = "缓存"
-                state.phases["上传"] = "0%"
+                state.phases["上传"] = "进度未知"
 
-                async def _cache_upload_progress(pct: int, spd: str):
-                    state.phases["上传"] = f"{pct}% ({spd})"
+                async def _cache_upload_progress(pct: int | None, note: str):
+                    state.phases["上传"] = _upload_phase(pct, note)
 
                 password = ""
                 upload_path = cached.pdf_path
                 if self._zip_encrypt:
                     password = _generate_password(self._custom_password)
                     zip_path = self._cache_dir / f"{aid}.zip"
-                    await asyncio.to_thread(
-                        _create_zip, Path(cached.pdf_path), zip_path, password
-                    )
+                    await asyncio.to_thread(_create_zip, Path(cached.pdf_path), zip_path, password)
                     upload_path = str(zip_path.resolve())
                     state.phases["合成"] = "ZIP"
 
-                from .napcat_stream import send_file_via_stream
-
-                _chunk_to = max(10, self._upload_timeout // 10)
-                _ul_to = self._upload_timeout + 120
-                send_result = await self._upload_with_watchdog(
-                    send_file_via_stream(
-                        self.ctx,
-                        sid,
-                        user_id,
-                        upload_path,
-                        is_group,
-                        group_id,
-                        _chunk_to,
-                        progress_cb=_cache_upload_progress,
-                        chunk_size=self._chunk_size,
-                        send_timeout=_ul_to,
-                    ),
-                    timeout=_ul_to,
-                )
+                send_result = await self._deliver(sid, user_id, is_group, group_id, upload_path, _cache_upload_progress)
                 state.phases["上传"] = "已完成"
                 state.phases["发送"] = "已完成"
                 state.status = "done"
@@ -993,31 +1012,13 @@ class JMdownPlugin(BasePlugin):
                 upload_path = zip_path
                 state.phases["合成"] = "ZIP"
 
-            # ── 4. 上传 NapCat temp ──
-            state.phases["上传"] = "0%"
+            # ── 4. 上传发送（_deliver 内部分派标准/分片两条链路）──
+            state.phases["上传"] = "进度未知"
 
-            async def _upload_progress(pct: int, spd: str):
-                state.phases["上传"] = f"{pct}% ({spd})"
+            async def _upload_progress(pct: int | None, note: str):
+                state.phases["上传"] = _upload_phase(pct, note)
 
-            from .napcat_stream import send_file_via_stream
-
-            _chunk_to = max(10, self._upload_timeout // 10)
-            _ul_timeout = self._upload_timeout + 120
-            send_result = await self._upload_with_watchdog(
-                send_file_via_stream(
-                    self.ctx,
-                    sid,
-                    user_id,
-                    str(upload_path.resolve()),
-                    is_group,
-                    group_id,
-                    _chunk_to,
-                    progress_cb=_upload_progress,
-                    chunk_size=self._chunk_size,
-                    send_timeout=_ul_timeout,
-                ),
-                timeout=_ul_timeout,
-            )
+            send_result = await self._deliver(sid, user_id, is_group, group_id, upload_path, _upload_progress)
             state.phases["上传"] = "已完成"
 
             # ── 5. 发送 ──
@@ -1048,9 +1049,7 @@ class JMdownPlugin(BasePlugin):
             # 若立即删除目录会 WinError 145（目录非空），登记后延迟释放。
             if isinstance(e, (TimeoutError, asyncio.CancelledError)):
                 self._orphan_aids.add(aid)
-                self._spawn_bg_task(
-                    self._release_orphan_after(aid, self._upload_timeout * 3)
-                )
+                self._spawn_bg_task(self._release_orphan_after(aid, self._upload_timeout * 3))
 
             if isinstance(e, asyncio.CancelledError):
                 state.error = "任务已被取消"
@@ -1058,8 +1057,10 @@ class JMdownPlugin(BasePlugin):
                 await self._send_completion_notice(sid, state)
                 raise
             else:
-                state.error = str(e)
-                logger.error(f"#{aid} 后台任务失败: {e}")
+                # 兜底：任何无消息异常都不能让 LLM 收到空白失败原因
+                detail = str(e).strip() or f"{type(e).__name__}（异常未提供错误详情）"
+                state.error = detail
+                logger.error(f"#{aid} 后台任务失败: {detail}")
             await self._send_completion_notice(sid, state)
         finally:
             # ZIP 是临时打包物（PDF 已单独缓存），任务结束无论成败都清理，
@@ -1185,12 +1186,7 @@ class JMdownPlugin(BasePlugin):
                 # 文件被占用（如缓存刚被其他实例读取）时跳过，不阻断插件加载
                 logger.warning(f"清理孤儿失败（文件被占用）: {f.name}")
         for d in self._download_dir.iterdir():
-            if (
-                d.is_dir()
-                and d.name.isdigit()
-                and int(d.name) not in known
-                and int(d.name) not in self._orphan_aids
-            ):
+            if d.is_dir() and d.name.isdigit() and int(d.name) not in known and int(d.name) not in self._orphan_aids:
                 try:
                     _rmtree(d)
                     logger.info(f"清理孤儿: {d.name}")

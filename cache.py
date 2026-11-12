@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass
@@ -33,7 +32,7 @@ class CacheIndex:
         self._load_error = False
         self._load()
 
-    def get(self, album_id: int) -> Optional[CacheEntry]:
+    def get(self, album_id: int) -> CacheEntry | None:
         for e in self._entries:
             if e.album_id == album_id:
                 return e
@@ -57,8 +56,7 @@ class CacheIndex:
         try:
             raw = json.loads(self._path.read_text("utf-8"))
             known = {f.name for f in fields(CacheEntry)}
-            self._entries = [CacheEntry(**{k: v for k, v in e.items() if k in known})
-                             for e in raw]
+            self._entries = [CacheEntry(**{k: v for k, v in e.items() if k in known}) for e in raw]
         except Exception:
             # logger unavailable in standalone context; caller checks _load_error
             self._load_error = True
@@ -67,9 +65,12 @@ class CacheIndex:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = [
             {
-                "album_id": e.album_id, "title": e.title,
-                "description": e.description, "page_count": e.page_count,
-                "pdf_path": e.pdf_path, "size_bytes": e.size_bytes,
+                "album_id": e.album_id,
+                "title": e.title,
+                "description": e.description,
+                "page_count": e.page_count,
+                "pdf_path": e.pdf_path,
+                "size_bytes": e.size_bytes,
                 "downloaded_at": e.downloaded_at,
             }
             for e in self._entries
