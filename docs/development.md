@@ -96,9 +96,10 @@ def _parse_target(target: str) -> tuple[str, bool, Optional[str]]:
 
 ```bash
 cd /path/to/KiraAI/data/plugins/jmdown
-python -m pytest -q               # 全量，约 2s
-python -m pytest -q -k manifest   # 只跑元数据契约
-python -m pytest -q -x --lf       # 失败即停 + 只重跑上次失败
+python -m pytest -q                          # 全量（含协议 e2e），约 4s
+python -m pytest -q tests/test_upload_e2e.py  # 只跑上传 e2e
+python -m pytest -q -k manifest              # 只跑元数据契约
+python -m pytest -q -x --lf                  # 失败即停 + 只重跑上次失败
 ```
 
 ### 为什么测试不依赖 KiraAI 运行时
@@ -114,7 +115,8 @@ python -m pytest -q -x --lf       # 失败即停 + 只重跑上次失败
 - **不要在 `__init__.py` 里做模块级 `from .main import`**：`main.py` 依赖 `core` 与
   `jmcomic`，把入口改成惰性 `__getattr__` 之后，`import` 本身才是无副作用的。
 
-桩与真实框架的差异由 `scripts/local_smoke_test.py` 在真实 KiraAI 上兜底，两者职责不重叠。
+桩与真实框架的差异由 `scripts/e2e_real_core.py`（真实客户端 + 假服务端）与
+`scripts/local_smoke_test.py`（真实 KiraAI + 网络）兜底，三者职责不重叠。
 
 ### 用例分布
 
@@ -122,8 +124,11 @@ python -m pytest -q -x --lf       # 失败即停 + 只重跑上次失败
 |------|------|
 | `test_cache.py` | FIFO 淘汰、索引损坏容错、`_load_error` 防御 |
 | `test_main.py` | 输入校验、去重、并发上限、跨会话拦截、后台 task 生命周期 |
-| `test_napcat.py` | 分片上传链路、SHA256、适配器查找 |
+| `test_napcat.py` | 分片上传链路、SHA256、适配器查找、stream_id 白名单 |
 | `test_manifest.py` | manifest / schema / README / 源码的跨文件一致性 |
+| `test_file_send.py` | 三方案分派、载荷形态、无本地闸门、旧配置迁移、进度未知、失败信息 |
+| `test_impl_support.py` | 实现方能力矩阵 ↔ 方案提示 ↔ 文档表格一致性 |
+| `test_upload_e2e.py` | **协议 e2e**：真实 WS 帧、服务端重组/SHA256、任务状态机 + 通知 |
 
 ### 元数据契约：改一处要同步三处
 
@@ -135,6 +140,42 @@ python -m pytest -q -x --lf       # 失败即停 + 只重跑上次失败
 
 新增工具同理：`@tool(...)` 与 README 的 ``### 工具：`name` `` 必须成对。
 `test_manifest.py` 会双向比对，漏改直接红，不用等用户装上才发现。
+
+## e2e 验证
+
+分三层，从轻到重：
+
+| 层 | 命令 | 验证什么 |
+|----|------|----------|
+| 单元 / 契约 | `python -m pytest -q` | 纯逻辑与跨文件一致性（CI 中跑） |
+| 协议 e2e | 同上，自动收集 `tests/test_upload_e2e.py` | 插件真实代码 → 真实 WebSocket 帧 → 假 OneBot 服务端 |
+| 真实 core 联动 | `cd /path/to/KiraAI && ./venv/Scripts/python.exe data/plugins/jmdown/scripts/e2e_real_core.py` | 换成 KiraAI 真正的 `NapCatWebSocketClient` |
+
+协议 e2e 的服务端在 `tests/_onebot_server.py`：校验 Bearer 鉴权、回 lifecycle 元事件、
+按 echo 回包、解码 `path` / `base64://` 载荷、按分片重组并比对 SHA256、
+按 NapCat/SnowLuma 格式给完成帧。覆盖三种上传方案、无本地体积闸门、进度语义、失败信息、
+只回 `retcode` 的实现、以及 `_task_runner` 缓存命中 → 上传 → 完成通知的完整任务链。
+**不需要 NapCat / QQ / KiraAI 在线**，CI 可直接跑（需 `pip install websockets`）。
+
+真实 core 联动脚本会先 `chdir` 到 KiraAI 根（`core.logging_manager` 按 CWD 打开
+`data/log.log`），再注入 `plugins` 合成包；它验证的是登录闸门、lifecycle、
+echo/Future 匹配与插件注册，对端仍是假服务端。
+
+### 上传上限实测（排障用，不写回配置）
+
+插件三条方案均不设本地体积上限，由实现端决定成败。2026-11-12 实测 NapCat.Core
+4.18.14：`base64` 私聊文件 37 MB 成功、38 MB 触发 `Max payload size exceeded`
+（与 `maxPayload=50MiB` 一致）。该值只作排障与容量规划参考：
+
+```bash
+python scripts/probe_upload_limit.py --dry-run     # 离线自检，不发任何文件
+python scripts/probe_upload_limit.py --execute --user <测试号> \
+    --url ws://127.0.0.1:3001 --token <token> --binary
+```
+
+`--execute` 下每次成功都会**真的往该会话发一个文件**，务必用测试号 / 测试群。
+`path` 与 `base64` 分别探测：前者受实现端本地文件限制，后者受请求体上限约束。
+超限时实现端通常丢帧不回包，脚本记为 `TimeoutError`，需查实现端日志确认原因。
 
 ### 手动集成冒烟
 

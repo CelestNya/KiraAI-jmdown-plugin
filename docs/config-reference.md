@@ -12,11 +12,9 @@
 | 加密 | `zip_encrypt` | `switch` | false | 开启后加密 ZIP（AES-256），关闭后直接发 PDF |
 | | `custom_password` | `string` | "" | 自定义密码，留空自动随机生成 |
 | 质量 | `pdf_quality` | `integer` | 85 | JPEG 质量 (1-100) |
-| 上传 | `use_napcat_stream` | `switch` | false | 使用 NapCat 分片上传；关闭走 OneBot 通用上传 |
-| | `file_payload` | `string` | auto | 标准上传载荷：auto / path / base64 |
-| | `standard_max_mb` | `integer` | 10 | base64 内联的原始体积上限（MB） |
+| 上传 | `upload_method` | `string` | path | 三选一：path / base64 / stream，下拉 hint 逐项说明 |
 | | `upload_timeout` | `integer` | 300 | 上传超时秒数 |
-| | `chunk_size` | `integer` | 524288 | Stream 分片字节数，默认 512KB |
+| | `chunk_size` | `integer` | 524288 | 仅 stream 生效：分片字节数，默认 512KB |
 | 缓存 | `max_cache` | `integer` | 10 | 最多缓存几本 PDF |
 | 通知 | `notify_llm` | `switch` | true | 完成后是否触发 LLM 回复 |
 
@@ -104,21 +102,11 @@
         "hint": "文件发送方式与超时配置",
         "collapsed": false,
         "fields": {
-            "use_napcat_stream": {
-                "type": "switch",
-                "default": false,
-                "hint": "使用 NapCat 分片上传（NapCat 专有接口），关闭走 OneBot 通用上传"
-            },
-            "file_payload": {
+            "upload_method": {
                 "type": "string",
-                "default": "auto",
-                "options": ["auto", "path", "base64"],
-                "hint": "标准上传载荷：auto 按 NapCat 地址判定，path 仅同机，base64 跨机可用"
-            },
-            "standard_max_mb": {
-                "type": "integer",
-                "default": 10,
-                "hint": "base64 内联的原始体积上限（MB），超过即拒绝"
+                "default": "path",
+                "options": ["path", "base64", "stream"],
+                "hint": "① path 同机路径直传；② base64 跨机内联；③ stream 分片（仅 NapCat / SnowLuma）"
             },
             "upload_timeout": {
                 "type": "integer",
@@ -201,30 +189,63 @@ FIFO 队列。新条目超出上限时，删除最早下载的条目。索引持
 
 单次 `send_action` 的超时。大文件（50MB+）上传可能需要 300s 以上，建议按文件大小调整。外层 `asyncio.wait_for` 做硬超时兜底。
 
-### use_napcat_stream
+### upload_method
 
-分片上传（`upload_file_stream`）是 NapCat 专有接口，其他 OneBot 实现不提供。关闭时插件改用
-`upload_private_file` / `upload_group_file` —— OneBot 生态的通用扩展动作，NapCat、LLOneBot、
-Lagrange 都实现。默认关闭，即默认不绑定 NapCat。
+三种上传方案显式三选一，不再按 WS 地址自动猜测：
 
-### file_payload
+| 值 | 链路 | 适用 | 进度 |
+|----|------|------|------|
+| `path`（默认） | 一次 `upload_private_file` / `upload_group_file`，`file` 为实现端机器上的绝对路径 | 同机部署；零膨胀、无体积闸门；6 种实现全部支持 | 进度未知 |
+| `base64` | 同一组动作，`file` 为 `base64://` 内联内容 | 跨机；体积 +33%，体积上限由实现端决定（插件不设闸门）；仅 NapCat / SnowLuma / LLOneBot / OpenShamrock 支持 | 进度未知 |
+| `stream` | `upload_file_stream` 逐片 → 实现端临时路径 → 同一组发送动作 | 跨机大文件；仅 NapCat / SnowLuma 提供 | 分片期间真实百分比；实现端发送阶段进度未知 |
 
-`file` 参数的形态决定了可用性边界：
+`upload_private_file` / `upload_group_file` 不是 OneBot 11 核心条款，而是 go-cqhttp 引入、
+各家实现共同提供的扩展动作，覆盖面如下（源码核查 2026-11-11）：
 
-| 值 | 行为 | 适用 |
-|----|------|------|
-| `auto` | 按 NapCat WS 地址判定：回环地址用路径，其他用 base64 | 默认；换部署形态不用改配置 |
-| `path` | 传 NapCat 所在机器上的绝对路径 | 必须同机，零膨胀，速度快 |
-| `base64` | 内联文件内容 | 跨机可用，体积 +33%，受请求体上限约束 |
+| 实现 | 标准上传 | path | `base64://` | 分片 |
+|------|:--------:|:----:|:-----------:|:----:|
+| NapCat | ✅ | ✅ | ✅ | ✅ |
+| SnowLuma | ✅ | ✅ | ✅ | ✅ |
+| LLOneBot | ✅ | ✅ | ✅ | ❌ |
+| Lagrange.OneBot (v1) | ✅ | ✅ | ❌ | ❌ |
+| OpenShamrock | ✅ | ✅ | ✅ | ❌ |
+| go-cqhttp（已停维护） | ✅ | ✅ | ❌ | ❌ |
 
-NapCat 与本插件不在同一台机器时，`path` 会让远端报「文件不存在」——这类错误很难定位，
-所以 `auto` 的默认判定是「不确定就内联」。
+标准动作是单次 `send_action`，实现端内部转存不回报中间状态，OneBot 也没有进度事件，
+因此 `path` / `base64` 一律显示「进度未知」而不是伪造百分比。`stream` 的百分比来自
+已确认分片数 / 总分片数，是真实字节进度；分片跑完后实现端把文件发给 QQ 的那一段仍无
+进度，同样回落「进度未知」。
 
-### standard_max_mb
+Lagrange.OneBot / go-cqhttp 不解析 `base64://`，也不提供分片动作，只能同机 + `path`。
+数据来源是 `impl_support.py`，`schema.json` 的提示与运行时报错都由它生成/校验。
 
-base64 内联的体积闸门。超过即拒绝并给出指引（同机部署 / 改分片 / 降质量），
-避免把「撞实现方上限」的代价转成用户侧的长时间等待。
-NapCat WS 接收帧上限 16MB，base64 膨胀 4/3，默认 10MB 为 JSON 信封留足余量。
+**旧配置迁移**：`use_napcat_stream`（开关）与 `file_payload`（载荷）已合并为本项。
+`use_napcat_stream=true` → `stream`；`file_payload=path/base64` → 同名方案；
+`file_payload=auto` → `path`（auto 已移除，启动时写告警日志）。跨机部署请显式改选
+`base64` 或 `stream`。
+
+### 体积上限与失败语义
+
+**三条方案都不设本地体积上限**。`path` 的请求体只含路径字符串，`stream` 按分片传输，
+`base64` 内联全文；能否成功完全由实现端的请求体 / 帧上限决定，插件不在发送前拦截。
+`standard_max_mb` 已移除，旧配置里残留该键会被忽略。
+
+2026-11-12 在线实测 NapCat.Core 4.18.14（`upload_private_file` + `base64://`，私聊）：
+1/4/8/10/16/24/32/37 MB 成功，38 MB 起失败，实现端日志为
+`Client Error: Max payload size exceeded`，与 `maxPayload=50MiB` × 3/4 ≈ 37.5 MiB 一致。
+旧文档「16MB 帧上限 → 取 10MB」的推导已被证伪。该实测值仅作排障参考，
+**不会写回配置**，其他实现的上限需各自实测。
+
+失败信息分两类，文本经 `TaskState.error` → 完成通知送达 LLM：
+
+| 情形 | 报告内容 |
+|------|----------|
+| 实现端返回失败响应 | 原样列出 `status` / `retcode` / `message` / `wording` / `data`，不替实现端判断原因 |
+| 等待响应超时 / 连接中断 | 说明动作、阶段、超时秒数、文件体积与「未收到响应」，列可能原因并提示查实现端日志；不把超时说成「文件太大」 |
+
+两类都附可操作指引（核对动作支持、目标会话权限、`path` 是否同机、换方案重试）。
+注意超限帧在实现端可能被直接丢弃、**不返回失败响应**，客户端只看到超时，因此
+`upload_timeout` 内的等待是预期行为；诊断要靠实现端日志，不是靠插件猜。
 
 ## 运行时配置目录
 

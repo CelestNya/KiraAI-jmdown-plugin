@@ -5,9 +5,12 @@
 NapCat QQ 机器人的标准 `upload_private_file` 接受两个来源：
 
 1. **URL**：NapCat 服务端下载远端文件
-2. **Base64**：直接传文件内容（体积膨胀 33%，受 WS 帧大小限制 ~16MB）
+2. **Base64**：直接传文件内容（体积膨胀 33%，受实现端 WS 帧上限约束）
 
-对于数十 MB 的 PDF，直接传 base64 会在 KiraAI-NapCat 间的 WS 连接中丢帧或超时。
+2026-11-12 在线实测 NapCat.Core 4.18.14：`maxPayload=50MiB`，`base64://` 文件
+37 MB 成功、38 MB 触发 `Client Error: Max payload size exceeded`（50 × 3/4 ≈ 37.5 MiB）。
+旧文档「~16MB」的说法已被证伪。插件不据此设置本地闸门，上限交给实现端决定。
+超过该边界时实现端可能直接丢帧不回包，客户端只看到超时，需查实现端日志确认。
 
 ## Stream API 分片策略
 
@@ -33,7 +36,7 @@ NapCat 提供 `upload_file_stream` 动作，支持分片上传：
 ## 实现细节
 
 ```python
-# CHUNK_SIZE = 512KB — 小于 WS 16MB 帧上限，平衡吞吐和 latency
+# CHUNK_SIZE = 512KB — 远小于 WS 50MiB 帧上限，平衡吞吐和 latency
 CHUNK_SIZE = 512 * 1024
 
 # 必须先计算完整文件 hash
@@ -49,13 +52,16 @@ params = {
 ### 进度回调
 
 ```python
-async def progress_cb(pct: int, speed_str: str):
-    # pct: 0-100
-    # speed_str: "x.x MB/s" 或 "x.x KB/s"
+async def progress_cb(pct: int | None, note: str):
+    # pct: 分片期间为 0-100 的真实百分比；实现端发送阶段为 None（进度未知）
+    # note: 分片期间是 "x.x MB/s" 速度串，None 时是阶段说明
     pass
 ```
 
 回调频率：约 20 次 + 首尾。每 `max(1, total_chunks // 20)` 片触发一次。
+分片全部到达实现端后、调用 `upload_private_file` / `upload_group_file` 之前，还会额外
+上报一次 `None`：这一段由实现端内部转存，协议不回报进度，不能继续挂在 100%。
+只有 `upload_method=stream` 才走这条链路；标准方案全程显示「进度未知」。
 
 ## 完整上传链路
 

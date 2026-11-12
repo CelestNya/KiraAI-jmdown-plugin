@@ -1,6 +1,6 @@
 # JMDown Plugin
 
-KiraAI 插件：下载禁漫天堂 (JMComic) 本子，合成 PDF，通过 NapCat Stream API 分片上传发送到 QQ。
+KiraAI 插件：下载禁漫天堂 (JMComic) 本子，合成 PDF，通过 OneBot 通用上传动作（path / base64）或可选分片（stream）发送文件到 QQ。
 
 ## 快速开始
 
