@@ -39,15 +39,20 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
-          # 测试侧依赖：core 由 tests/_core_stub.py 提供桩，不需要 KiraAI 运行时
-          python -m pip install pytest ruff packaging
+          # 测试侧依赖：core 由 tests/_core_stub.py 提供桩，不需要 KiraAI 运行时；
+          # websockets 供 tests/test_upload_e2e.py 起本地假 OneBot 服务端。
+          # ruff 钉死版本：formatter 的换行规则随版本变化，不钉会让「本地绿、CI 红」。
+          python -m pip install pytest "ruff==0.17.4" packaging websockets
 
       - name: Lint
         run: |
           ruff check .
           ruff format --check .
 
-      - name: 单元测试
-        # pytest.ini 已钉 testpaths=tests；scripts/local_smoke_test.py 需要真实
-        # KiraAI 与网络，不参与自动收集
+      - name: 单元测试 + 协议 e2e
+        # pytest.ini 已钉 testpaths=tests，自动收集 tests/test_upload_e2e.py；
+        # scripts/ 下的真实环境脚本不被收集
         run: python -m pytest -q
+
+      - name: 上传上限探测脚本自检（离线）
+        run: python scripts/probe_upload_limit.py --dry-run

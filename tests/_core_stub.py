@@ -6,8 +6,10 @@ KiraAI 运行时。
 
 为什么无条件注入桩（而不是「有真 core 就用真 core」）：若同一份用例
 随环境在真 core 与桩之间漂移，本地与 CI 的语义就不一致，改 core 时会
-出现「本地绿、CI 红」的假信号。插件与真实框架的契约由
-``scripts/local_smoke_test.py`` 在真实 KiraAI 上验证，两者职责不重叠。
+出现「本地绿、CI 红」的假信号。插件与真实框架的契约分两层验证：
+``tests/test_upload_e2e.py`` + ``scripts/e2e_real_core.py`` 用假 OneBot 服务端
+验证协议帧与真实客户端接合，``scripts/local_smoke_test.py`` 在真实 KiraAI
+上验证完整加载，三者职责不重叠。
 
 维护提示：插件开始使用 core 的新符号时，同步在这里补桩。宁可 import
 阶段直接失败，也不要带着半个契约跑过。

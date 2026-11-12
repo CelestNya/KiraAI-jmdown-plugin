@@ -2,6 +2,9 @@
 # 规则集刻意保持保守：先补齐「正确性 + import 卫生」，风格类规则交给 formatter。
 target-version = "py311"
 line-length = 120
+# docs/ 是手写说明文档，代码片段服务于讲解语境；ruff >=0.16 会连 Markdown 里的
+# python 代码块一起格式化，改的是排版而不是正确性，排除掉更可控。
+extend-exclude = ["docs"]
 
 [lint]
 select = [

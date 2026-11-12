@@ -26,12 +26,47 @@ from jmcomic.jm_config import JmModuleConfig
 from PIL import Image
 
 from .cache import CacheEntry, CacheIndex
+from .impl_support import DEFAULT_UPLOAD_METHOD, UPLOAD_METHODS, diagnosis_hint, format_no_response
 
 
 class JMDownError(RuntimeError):
     """JMdown 插件自定义错误"""
 
     pass
+
+
+def _resolve_upload_method(raw, upload: dict, flat: dict) -> str:
+    """解析三选一配置，并把旧版「开关 + 载荷」配置迁移过来。
+
+    ``auto`` 已移除：旧值一律落到默认方案并明确告警，避免跨机部署时
+    静默从 base64 退化成路径直传、最后只得到一个远端「文件不存在」。
+    """
+    if raw is not None and raw not in UPLOAD_METHODS:
+        logger.warning(f"upload_method={raw!r} 非法，回退 {DEFAULT_UPLOAD_METHOD}")
+        raw = None
+    if raw is not None:
+        return raw
+
+    legacy_stream = upload.get("use_napcat_stream", flat.get("use_napcat_stream", False))
+    legacy_payload = upload.get("file_payload", flat.get("file_payload", ""))
+    if not legacy_stream and not legacy_payload:
+        return DEFAULT_UPLOAD_METHOD
+
+    logger.warning("检测到旧上传配置（use_napcat_stream / file_payload），已迁移到 upload_method")
+    if bool(legacy_stream):
+        return "stream"
+    if legacy_payload in ("path", "base64"):
+        return legacy_payload
+    logger.warning(
+        f"旧配置 file_payload={legacy_payload!r} 已移除，按 {DEFAULT_UPLOAD_METHOD} 处理；"
+        "跨机部署请在 WebUI 显式选择 base64 或 stream"
+    )
+    return DEFAULT_UPLOAD_METHOD
+
+
+def _upload_phase(pct: int | None, note: str) -> str:
+    """进度回调 → 状态文本。无真实百分比时写「进度未知」，不伪造 0%。"""
+    return "进度未知" if pct is None else f"{pct}% ({note})"
 
 
 @dataclass
@@ -378,9 +413,7 @@ class JMdownPlugin(BasePlugin):
         self._pdf_quality: int = 85
         self._upload_timeout: int = 300
         self._chunk_size: int = 512 * 1024
-        self._use_napcat_stream: bool = False
-        self._file_payload: str = "auto"
-        self._standard_max_bytes: int = 10 * 1024 * 1024
+        self._upload_method: str = DEFAULT_UPLOAD_METHOD
         self._allow_cross_session: bool = False
 
         # 后台任务系统
@@ -476,17 +509,15 @@ class JMdownPlugin(BasePlugin):
         self._download_threads = max(1, int(_g(dl, "download_threads", 45)))
         self._upload_timeout = max(1, int(_g(upload, "upload_timeout", 300)))
         self._chunk_size = min(
-            16 * 1024 * 1024,  # NapCat WS 帧上限
+            16 * 1024 * 1024,  # 单片上限：避免单帧过大，不是文件大小闸门
             max(4096, int(_g(upload, "chunk_size", 512 * 1024))),
         )
         self._notify_llm = bool(_g(notification, "notify_llm", True))
         self._content_query = bool(_g(content, "content_query", False))
         self._block_content_tools = bool(_g(content, "block_content_tools", True))
         self._allow_cross_session = bool(_g(content, "allow_cross_session", False))
-        # 默认走 OneBot 通用上传；分片是 NapCat 专有能力，必须显式开启
-        self._use_napcat_stream = bool(_g(upload, "use_napcat_stream", False))
-        self._file_payload = str(_g(upload, "file_payload", "auto"))
-        self._standard_max_bytes = max(1, int(_g(upload, "standard_max_mb", 10))) * 1024 * 1024
+        # 三选一：path / base64 走通用扩展动作，stream 走分片（仅 NapCat / SnowLuma）
+        self._upload_method = _resolve_upload_method(_g(upload, "upload_method", None), upload, self.plugin_cfg)
         self._zip_encrypt = bool(_g(encryption, "zip_encrypt", False))
         if self._zip_encrypt:
             try:
@@ -512,24 +543,32 @@ class JMdownPlugin(BasePlugin):
         logger.info("JMdown 已终止")
 
     async def _upload_with_watchdog(self, upload_coro, timeout: int) -> str:
-        """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。"""
+        """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。
+
+        内层超时若已带动作名等信息就保留原文，只补上诊断指引；空消息则换成
+        带方案名与超时秒数的完整说明，避免 LLM 收到空白失败原因。
+        """
         try:
             return await asyncio.wait_for(upload_coro, timeout=timeout)
         except TimeoutError as e:
-            # 保留 send_action 的原始超时信息（含 API 名），便于区分
-            # 分片上传超时与发送阶段超时
-            raise TimeoutError(f"上传超时: {e}") from e
+            original = str(e).strip()
+            detail = (
+                f"{original} {diagnosis_hint()}"
+                if original
+                else format_no_response(f"{self._upload_method} 方案", timeout, stage="上传总看门狗")
+            )
+            raise TimeoutError(detail) from e
 
     async def _deliver(self, sid, user_id, is_group, group_id, upload_path, progress_cb) -> str:
-        """发送文件：按配置在「OneBot 通用上传」与「NapCat 分片」之间二选一。
+        """按 upload_method 在三种方案间分派。
 
-        两条链路的差异集中在载荷形态，任务流程不该知道这些细节，所以统一在
-        这里分派；调用方只关心进度回调与结果文本。
+        path / base64 走同一组标准动作（区别只在 file 参数形态），stream 走分片。
+        任务流程不该知道这些细节，调用方只关心进度回调与结果文本。
         """
         file_path = str(Path(upload_path).resolve())
         ul_timeout = self._upload_timeout + 120
 
-        if self._use_napcat_stream:
+        if self._upload_method == "stream":
             from .napcat_stream import send_file_via_stream
 
             coro = send_file_via_stream(
@@ -555,8 +594,7 @@ class JMdownPlugin(BasePlugin):
                 group_id=group_id,
                 timeout=ul_timeout,
                 progress_cb=progress_cb,
-                payload_mode=self._file_payload,
-                max_bytes=self._standard_max_bytes,
+                payload_mode=self._upload_method,
             )
 
         return await self._upload_with_watchdog(coro, timeout=ul_timeout)
@@ -875,10 +913,10 @@ class JMdownPlugin(BasePlugin):
             if cached and Path(cached.pdf_path).exists():
                 state.phases["下载"] = "缓存"
                 state.phases["合成"] = "缓存"
-                state.phases["上传"] = "0%"
+                state.phases["上传"] = "进度未知"
 
-                async def _cache_upload_progress(pct: int, spd: str):
-                    state.phases["上传"] = f"{pct}% ({spd})"
+                async def _cache_upload_progress(pct: int | None, note: str):
+                    state.phases["上传"] = _upload_phase(pct, note)
 
                 password = ""
                 upload_path = cached.pdf_path
@@ -974,11 +1012,11 @@ class JMdownPlugin(BasePlugin):
                 upload_path = zip_path
                 state.phases["合成"] = "ZIP"
 
-            # ── 4. 上传 NapCat temp ──
-            state.phases["上传"] = "0%"
+            # ── 4. 上传发送（_deliver 内部分派标准/分片两条链路）──
+            state.phases["上传"] = "进度未知"
 
-            async def _upload_progress(pct: int, spd: str):
-                state.phases["上传"] = f"{pct}% ({spd})"
+            async def _upload_progress(pct: int | None, note: str):
+                state.phases["上传"] = _upload_phase(pct, note)
 
             send_result = await self._deliver(sid, user_id, is_group, group_id, upload_path, _upload_progress)
             state.phases["上传"] = "已完成"
@@ -1019,8 +1057,10 @@ class JMdownPlugin(BasePlugin):
                 await self._send_completion_notice(sid, state)
                 raise
             else:
-                state.error = str(e)
-                logger.error(f"#{aid} 后台任务失败: {e}")
+                # 兜底：任何无消息异常都不能让 LLM 收到空白失败原因
+                detail = str(e).strip() or f"{type(e).__name__}（异常未提供错误详情）"
+                state.error = detail
+                logger.error(f"#{aid} 后台任务失败: {detail}")
             await self._send_completion_notice(sid, state)
         finally:
             # ZIP 是临时打包物（PDF 已单独缓存），任务结束无论成败都清理，

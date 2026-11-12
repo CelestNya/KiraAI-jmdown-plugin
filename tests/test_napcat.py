@@ -18,9 +18,10 @@ import _core_stub
 
 _core_stub.bootstrap()
 
-from napcat_stream import (  # noqa: E402
+from jmdown.napcat_stream import (  # noqa: E402
     _find_qq_adapter,
     _fmt,
+    _make_stream_id,
     _sha256_file,
     send_file_via_stream,
     stream_upload_file,
@@ -194,6 +195,27 @@ class SendFileViaStreamTest(unittest.IsolatedAsyncioTestCase):
         for action, _, t in calls:
             if action == "upload_group_file":
                 self.assertEqual(t, 420)
+
+
+class StreamIdTest(unittest.TestCase):
+    """SnowLuma 用 /^[A-Za-z0-9_-]{1,128}$/ 校验 stream_id。
+
+    原实现直接拼 basename（含 .pdf / 中文 / 空格），第一片就会被拒绝。
+    """
+
+    def test_matches_snowluma_whitelist(self):
+        import re
+
+        valid = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+        for name in ("123456.pdf", "本子 名称.zip", "a+b(c).pdf", ".hidden", ""):
+            with self.subTest(name=name):
+                sid = _make_stream_id(f"/tmp/jmdown/{name}")
+                self.assertRegex(sid, valid)
+                self.assertLessEqual(len(sid), 128)
+                self.assertTrue(sid.startswith("jmdown_"))
+
+    def test_different_names_do_not_collide(self):
+        self.assertNotEqual(_make_stream_id("/tmp/a.pdf"), _make_stream_id("/tmp/b.pdf"))
 
 
 if __name__ == "__main__":

@@ -2,14 +2,14 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](requirements.txt)
-[![Version](https://img.shields.io/badge/version-2.9.5-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.10.0-blue)](manifest.json)
 
-**jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 分片流传输发送到 QQ。
+**jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 按所选上传方案发送文件到 QQ。
 
 ## 工作流程
 
 ```
-用户请求本子 ID → 后台异步任务 → 下载图片 → 合成 PDF → NapCat Stream 分片上传 → 发送到目标会话 → 完成通知（可选触发 LLM 回复）
+用户请求本子 ID → 后台异步任务 → 下载图片 → 合成 PDF（可选加密 ZIP）→ 上传发送（三选一：path / base64 / stream）→ 完成通知（可选触发 LLM 回复）
 ```
 
 | 阶段 | 说明 |
@@ -17,8 +17,8 @@
 | 提交任务 | LLM 调用 `send_jm_album` 工具，返回 `JOB-<随机串>` 标识码 |
 | 下载 | jmcomic 库并行下载图片，按 album_id 建目录，实时百分比+速度 |
 | 合成 | img2pdf + Pillow 合成为 PDF，实时报进度 |
-| 上传 | NapCat Stream API 分片上传（512KB/片），绕过 WS 帧限制 |
-| 发送 | `upload_private_file` / `upload_group_file` 发送给目标 |
+| 上传 | `path` / `base64` 一次 `upload_private_file` / `upload_group_file`；`stream` 走 `upload_file_stream`（512KB/片） |
+| 发送 | `stream` 方案下用实现端临时路径调用 `upload_private_file` / `upload_group_file` |
 | 通知 | 完成/失败时发通知到目标会话，可选触发 LLM 自动回复 |
 
 ## 安装
@@ -26,8 +26,8 @@
 ### 前提条件
 
 - Python ≥ 3.11
-- KiraAI（含 NapCatQQ + WebSocket 连接）
-- QQ 机器人框架（NapCat）
+- KiraAI（正向 WebSocket 连接）
+- 支持文件上传动作的 OneBot 实现（见下方支持矩阵）
 
 ### 步骤
 
@@ -130,15 +130,35 @@ LLM → 告知用户任务已提交
 | **质量** ||||
 | `pdf_quality` | integer | 85 | JPEG 质量 (1-100) |
 | **上传** ||||
-| `use_napcat_stream` | switch | false | 使用 NapCat 分片上传。关闭走 OneBot 通用上传（`upload_private_file` / `upload_group_file`），不依赖 NapCat 专有接口 |
-| `file_payload` | string | auto | 标准上传的载荷形态：auto / path / base64。auto 按 NapCat 地址判断（本机=路径，跨机=内联） |
-| `standard_max_mb` | integer | 10 | base64 内联的原始体积上限（MB），超过即拒绝并提示改用路径直传或分片 |
-| `upload_timeout` | integer | 300 | 上传超时秒数 |
-| `chunk_size` | integer | 524288 | Stream 分片字节数，默认 512KB（仅分片模式） |
+| `upload_method` | string | path | 三选一：`path`=标准动作+本地绝对路径（同机，6 种实现全支持）/ `base64`=标准动作+内联内容（跨机，+33%，仅 4 种实现支持）/ `stream`=分片（仅 NapCat、SnowLuma，唯一有真实上传百分比）。下拉框的 hint 有逐项说明 |
+| `upload_timeout` | integer | 300 | 上传超时秒数；超时未收到实现端响应时给出带诊断指引的失败说明 |
+| `chunk_size` | integer | 524288 | 仅 `stream` 生效：分片字节数，默认 512KB |
 | **缓存** ||||
 | `max_cache` | integer | 10 | 最多缓存几本 PDF |
 | **通知** ||||
 | `notify_llm` | switch | true | 完成后是否触发 LLM 回复 |
+
+### OneBot 实现支持矩阵
+
+`upload_private_file` / `upload_group_file` 不是 OneBot 11 核心条款，而是 go-cqhttp 引入、
+各家实现共同提供的**扩展动作**。下表依据各项目源码核查（2026-11-11），不是运行时探测：
+
+| 实现 | 标准上传 | path 直传 | `base64://` | 分片上传 |
+|------|:--------:|:---------:|:-----------:|:--------:|
+| NapCat | ✅ | ✅ | ✅ | ✅ |
+| SnowLuma | ✅ | ✅ | ✅ | ✅ |
+| LLOneBot | ✅ | ✅ | ✅ | ❌ |
+| Lagrange.OneBot (v1) | ✅ | ✅ | ❌ | ❌ |
+| OpenShamrock | ✅ | ✅ | ✅ | ❌ |
+| go-cqhttp（已停维护） | ✅ | ✅ | ❌ | ❌ |
+
+三种方案按部署形态显式选择：同机用 `path`；跨机且实现支持内联用 `base64`；跨机大文件且实现为 NapCat / SnowLuma 用 `stream`。Lagrange.OneBot 与 go-cqhttp 既不解析 `base64://` 也不提供分片动作，只能同机 + `path`。
+
+进度语义：`path` / `base64` 是单次动作，协议不回报中间状态，状态显示「进度未知」；`stream` 分片期间显示真实百分比，分片完成后实现端发送阶段同样显示「进度未知」。
+
+体积上限：三条方案**均不设本地闸门**，由实现端决定成败。2026-11-12 实测 NapCat.Core 4.18.14 的 `base64` 私聊文件 37 MB 成功、38 MB 触发 `Max payload size exceeded`（与 `maxPayload=50MiB` 一致）；该值仅作排障参考，不写回配置。失败时如实报告实现端返回的 `status` / `retcode` / `message`，或说明「等待响应超时」并附诊断指引，不腉断原因、不编造上限。
+
+旧配置迁移：`use_napcat_stream` / `file_payload` 已合并为 `upload_method`。旧值 `auto` 已移除，升级后按 `path` 处理并写告警日志；跨机部署请在 WebUI 重新选 `base64` 或 `stream`。
 
 ## 缓存位置
 
@@ -148,11 +168,11 @@ LLM → 告知用户任务已提交
 
 ## 技术要点
 
-- 大文件上传走 NapCat Stream API（分片 + `is_complete` 组装），分片大小可配置
+- `upload_method` 三选一：`path` / `base64` 走 `upload_private_file` / `upload_group_file` 通用扩展动作；`stream` 走 `upload_file_stream` 分片（`is_complete` 组装，分片大小可配），仅 NapCat / SnowLuma 提供
 - 目录规则使用 `Bd_Aid`（按 album_id 命名），不依赖标题
 - 页数从 `get_photo_detail.page_arr` 获取，确保与实际下载文件精确匹配
 - 使用 `download_photo` 只下单章，挂载章节（分P本子）不自动下载，ID 暴露给 LLM 决定
-- 下载/合成/上传三阶段均实时显示百分比和速度
+- 下载/合成显示真实百分比；上传阶段仅 `stream` 分片期间有真实百分比，`path` / `base64` 及实现端发送阶段一律显示「进度未知」
 - 后台任务（Background task）绕过 KiraAI tool 60s 超时限制
 - `content_query` 开关关闭时，搜索、元信息查询、完成通知中的元数据全部隐藏，仅保留下载发送功能
 - 上传用 `asyncio.wait_for` 做外层硬超时，避免 WS 半开连接卡死任务
@@ -164,14 +184,16 @@ LLM → 告知用户任务已提交
 ├── __init__.py          # 包入口（惰性导出，不做模块级导入）
 ├── main.py              # 核心实现（工具、任务管理、下载、PDF、通知）
 ├── cache.py             # FIFO 缓存模块
-├── napcat_stream.py     # NapCat Stream API 分片上传封装
+├── file_send.py         # 标准上传（通用扩展动作）
+├── napcat_stream.py     # 分片上传（upload_file_stream）
+├── impl_support.py      # OneBot 实现方能力矩阵（提示文本唯一数据源）
 ├── manifest.json        # 插件元信息
 ├── schema.json          # 配置参数定义
 ├── requirements.txt     # 依赖声明（KiraAI 安装时读取此文件）
 ├── pytest.ini           # 测试入口配置（testpaths = tests）
 ├── ruff.toml            # lint / format 规则
-├── tests/               # 单元测试（不依赖 KiraAI 运行时）
-├── scripts/             # 手动集成冒烟脚本
+├── tests/               # 单元测试 + 协议 e2e（不依赖 KiraAI 运行时）
+├── scripts/             # 真实 core 联动 e2e、上传上限探测、集成冒烟
 ├── .github/workflows/   # CI：lint + format + pytest（3.11 / 3.12 / 3.13）
 ├── docs/                # VitePress 开发者文档
 ├── LICENSE
@@ -181,14 +203,18 @@ LLM → 告知用户任务已提交
 ## 开发
 
 ```bash
-python -m pytest -q          # 84 个单元测试，约 2s
+python -m pytest -q          # 128 个用例（含 11 个协议 e2e），约 4s
 ruff check .                 # 规则见 ruff.toml
 ruff format --check .
 ```
 
-测试通过 `tests/_core_stub.py` 注入 `core` 桩，因此不需要完整 KiraAI 运行时；
-与真实框架的契约由 `scripts/local_smoke_test.py` 手动验证。详见
-[docs/development.md](docs/development.md)。
+测试通过 `tests/_core_stub.py` 注入 `core` 桩，因此不需要完整 KiraAI 运行时。
+`tests/test_upload_e2e.py` 会起本地假 OneBot WS 服务端，验证插件发出的真实协议帧
+（含分片重组与 SHA256），同样不需要 NapCat / QQ 在线。
+
+另有两个手动脚本：`scripts/e2e_real_core.py` 换成 KiraAI 真实客户端做联动验证；
+`scripts/probe_upload_limit.py --dry-run` 自检上限探测链路（`--execute` 才会真的发文件）。
+详见 [docs/development.md](docs/development.md)。
 
 ## 许可
 
