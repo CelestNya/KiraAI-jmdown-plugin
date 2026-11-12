@@ -118,30 +118,43 @@
     "upload": {
         "type": "section",
         "name": "上传",
-        "hint": "NapCat 分片上传配置",
+        "hint": "文件发送方式与超时配置",
         "collapsed": false,
         "fields": {
+            "upload_method": {
+                "type": "string",
+                "name": "上传方案",
+                "default": "path",
+                "options": ["path", "base64", "stream"],
+                "hint": "三选一。① path（默认）：用 upload_private_file / upload_group_file 传本地绝对路径，要求实现端与插件同机，零膨胀、无体积闸门，NapCat、SnowLuma、LLOneBot、Lagrange.OneBot、OpenShamrock、go-cqhttp 全部支持；② base64：同样的标准动作但内联 base64:// 内容，跨机可用、体积 +33%，体积上限由实现端决定（插件不设闸门，失败时如实报告原因），仅 NapCat、SnowLuma、LLOneBot、OpenShamrock 支持，Lagrange.OneBot、go-cqhttp 不解析内联，用它们必须选 path 并同机部署；③ stream：upload_file_stream 分片，仅 NapCat、SnowLuma 提供，适合跨机大文件，也是唯一能给出真实上传百分比的方案。三条方案均不设本地体积上限；path / base64 期间进度显示「进度未知」",
+                "locales": {
+                    "zh": {
+                        "name": "上传方案",
+                        "hint": "三选一。① path（默认）：用 upload_private_file / upload_group_file 传本地绝对路径，要求实现端与插件同机，零膨胀、无体积闸门，NapCat、SnowLuma、LLOneBot、Lagrange.OneBot、OpenShamrock、go-cqhttp 全部支持；② base64：同样的标准动作但内联 base64:// 内容，跨机可用、体积 +33%，体积上限由实现端决定（插件不设闸门，失败时如实报告原因），仅 NapCat、SnowLuma、LLOneBot、OpenShamrock 支持，Lagrange.OneBot、go-cqhttp 不解析内联，用它们必须选 path 并同机部署；③ stream：upload_file_stream 分片，仅 NapCat、SnowLuma 提供，适合跨机大文件，也是唯一能给出真实上传百分比的方案。三条方案均不设本地体积上限；path / base64 期间进度显示「进度未知」"
+                    }
+                }
+            },
             "upload_timeout": {
                 "type": "integer",
                 "name": "上传超时",
                 "default": 300,
-                "hint": "上传超时秒数（大文件建议 300+）",
+                "hint": "上传超时秒数（大文件建议 300+）；超时未收到实现端响应时会给出带诊断指引的失败说明，不会静默失败",
                 "locales": {
-                    "zh": { "name": "上传超时", "hint": "上传超时秒数（大文件建议 300+）" }
+                    "zh": { "name": "上传超时", "hint": "上传超时秒数（大文件建议 300+）；超时未收到实现端响应时会给出带诊断指引的失败说明，不会静默失败" }
                 }
             },
             "chunk_size": {
                 "type": "integer",
                 "name": "分片大小",
                 "default": 524288,
-                "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB",
+                "hint": "仅 stream 方案生效：分片字节数，默认 512KB。调整需重启，建议 512KB-4MB",
                 "locales": {
-                    "zh": { "name": "分片大小", "hint": "Stream 上传分片字节数，默认 512KB。调整需重启，建议 512KB-4MB" }
+                    "zh": { "name": "分片大小", "hint": "仅 stream 方案生效：分片字节数，默认 512KB。调整需重启，建议 512KB-4MB" }
                 }
             }
         },
         "locales": {
-            "zh": { "name": "上传", "hint": "NapCat 分片上传配置" }
+            "zh": { "name": "上传", "hint": "文件发送方式与超时配置" }
         }
     },
     "cache": {

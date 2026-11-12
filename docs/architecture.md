@@ -6,7 +6,9 @@
 __init__.py          ← 插件入口，导出 JMdownPlugin
 main.py              ← 核心逻辑：工具注册、任务管理、下载、PDF、加密、通知
 cache.py             ← FIFO 缓存队列，独立可测试
-napcat_stream.py     ← NapCat Stream API 封装，分片上传、发送
+file_send.py         ← 标准上传（upload_private_file / upload_group_file）
+napcat_stream.py     ← 分片上传（upload_file_stream，NapCat / SnowLuma）
+impl_support.py      ← 实现方能力矩阵（提示文本唯一数据源）
 manifest.json        ← 插件元信息
 schema.json          ← 配置项定义
 ```
@@ -33,7 +35,10 @@ LLM 调用 send_jm_album (或 query_jm_album / search_jm_album)
             └─ zip_encrypt=true  → 压缩为 AES-256 加密 ZIP
             │
             ▼
-            4. 分片上传 (NapCat Stream API)
+            4. `_deliver()` 按 upload_method 分派
+            │   ├─ path   ：一次 upload_private_file / upload_group_file（本地路径）
+            │   ├─ base64 ：同上的动作，file=base64:// 内联内容
+            │   └─ stream ：upload_file_stream 逐片 → 远端 temp 路径 → 同上的发送动作
             │
             ▼
             5. 发送到目标会话
@@ -54,8 +59,8 @@ LLM 调用 send_jm_album (或 query_jm_album / search_jm_album)
 |------|------|------|
 | 下载 | 数秒~数分钟 | jmcomic 并行下载，依赖网络 |
 | 合成 | 数秒~数十秒 | 图片转 JPEG → img2pdf，可选 ZIP 加密 |
-| 上传 | 数秒~数分钟 | WS 分片上传，chunk_size 可配置 |
-| 发送 | <1s | NapCat 内部文件操作 |
+| 上传 | 数秒~数分钟 | path / base64 一次通用动作；stream 按 chunk_size 逐片上传 |
+| 发送 | <1s | 实现端内部文件操作 |
 
 ## 关键设计决策
 
@@ -63,9 +68,25 @@ LLM 调用 send_jm_album (或 query_jm_album / search_jm_album)
 
 KiraAI tool 有约 60s 超时。下载 + PDF + 上传大文件远超此限制。后台 task 配合 `query_jm_task` 轮询 + 完成通知，完全绕过超时。
 
-### 为何用 NapCat Stream API
+### 为何默认 path，以及三种方案的取舍
 
-旧方案：`upload_private_file` 传 base64，文件体积膨胀 33%，且 NapCat WS 帧上限 16MB。Stream API 分片上传（chunk_size 默认 512KB），通过 `is_complete` 信号组装后仅传远端路径，无体积限制。
+`upload_private_file` / `upload_group_file` 是覆盖面最广的扩展动作：NapCat、SnowLuma、
+LLOneBot、Lagrange.OneBot、OpenShamrock、go-cqhttp 都实现（见 `impl_support.py`）。
+`path` 在此基础上只传绝对路径，请求体极小，一次 `send_action` 完成，没有多帧与超时叠加，
+因此作为唯一不挑实现的默认值——代价是必须同机部署。
+
+`base64` 把文件内容内联进 `file`，跨机可用但体积 +33%，且 Lagrange.OneBot / go-cqhttp
+不解析 `base64://`；`stream` 走 `upload_file_stream` 分片，只有 NapCat 与 SnowLuma 提供，
+适合跨机大文件，绕开内联膨胀与请求体上限，代价是每片一次 round-trip、每片独立超时，
+以及进度回调与失败面的复杂度。三种方案由 `upload_method` 显式选择，不再按 WS 地址猜测，
+避免「换了个部署位置就静默换链路」。
+
+进度方面，标准动作是单次调用、协议不回报中间状态，只有 `stream` 分片期间能给出真实
+百分比；其余阶段统一显示「进度未知」，不伪造数字误导 LLM。
+
+三条方案都不设本地体积上限，上限由实现端决定；失败时 `FileSendError` 如实转述
+实现端的失败响应，或说明「等待响应超时」并附诊断指引，不腉断原因、不编造上限。
+文本经 `TaskState.error` → 完成通知送达 LLM，且对无消息异常有非空兜底。
 
 ### 为何用 `Bd_Aid` 目录规则
 

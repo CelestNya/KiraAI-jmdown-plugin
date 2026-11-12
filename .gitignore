@@ -22,6 +22,8 @@ Thumbs.db
 _test_tmp/
 test_output/
 test_dl/
+.pytest_cache/
+.ruff_cache/
 
 # Environment
 .env
