@@ -287,9 +287,11 @@ async def run_send(*, tmp_path: Path, is_group: bool = False) -> list[tuple[str,
         return {"status": "ok", "data": {}}
 
     kwargs: dict[str, Any] = {"timeout": 30, "send_timeout": 420, "chunk_size": 16}
+    sid = "qq:dm:123"
     if is_group:
         kwargs.update(is_group=True, group_id="999")
-    await send_file_via_stream(make_ctx(make_client(fake_send)), "qq:dm:123", "123", str(fp), **kwargs)
+        sid = "qq:gm:999"
+    await send_file_via_stream(make_ctx(make_client(fake_send)), sid, "123", str(fp), **kwargs)
     return calls
 
 
