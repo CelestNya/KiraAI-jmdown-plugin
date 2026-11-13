@@ -42,7 +42,8 @@ jobs:
           # 测试侧依赖：core 由 tests/_core_stub.py 提供桩，不需要 KiraAI 运行时；
           # websockets 供 tests/test_upload_e2e.py 起本地假 OneBot 服务端。
           # ruff 钉死版本：formatter 的换行规则随版本变化，不钉会让「本地绿、CI 红」。
-          python -m pip install pytest "ruff==0.17.4" packaging websockets
+          # pytest / pytest-asyncio 同理：异步用例的收集与 loop 作用域行为随版本变。
+          python -m pip install "pytest==9.2.0" "pytest-asyncio==1.4.1" "ruff==0.17.4" packaging websockets
 
       - name: Lint
         run: |

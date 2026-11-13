@@ -10,13 +10,10 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
-import unittest
 from pathlib import Path
 from typing import Any
 
-import _core_stub
-
-_core_stub.bootstrap()
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = ROOT / "manifest.json"
@@ -46,153 +43,169 @@ def readme_config_keys(readme: str) -> set[str]:
     return set(re.findall(r"^\|\s*`([a-z_]+)`\s*\|", readme, flags=re.MULTILINE))
 
 
-class ManifestTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.manifest = load_json(MANIFEST_PATH)
-
-    def test_required_keys(self) -> None:
-        for key in (
-            "display_name",
-            "plugin_id",
-            "version",
-            "author",
-            "description",
-            "core_version",
-            "repo",
-        ):
-            self.assertIn(key, self.manifest, f"manifest 缺少必需字段 {key}")
-
-    def test_plugin_id_is_safe_identifier(self) -> None:
-        # plugin_id 会被用作配置文件名（data/config/plugins/<id>.json）与注册表键，
-        # 含路径分隔符或空格会静默写错位置。
-        # 注意：不能用「plugin_id == 目录名」来校验 —— CI checkout 的目录名是仓库名
-        # （KiraAI-jmdown-plugin），与安装目录（jmdown）本来就不一致。
-        self.assertRegex(self.manifest["plugin_id"], r"^[a-z][a-z0-9_]*$")
-
-    def test_readme_clones_into_plugin_id_directory(self) -> None:
-        readme = README_PATH.read_text(encoding="utf-8")
-        self.assertRegex(
-            readme,
-            rf"git clone \S+\s+{self.manifest['plugin_id']}\b",
-            "安装步骤必须把仓库克隆到与 plugin_id 同名的目录",
-        )
-
-    def test_version_is_semver(self) -> None:
-        self.assertRegex(self.manifest["version"], r"^\d+\.\d+\.\d+$")
-
-    def test_core_version_is_specifier(self) -> None:
-        if importlib.util.find_spec("packaging") is None:
-            self.skipTest("packaging 未安装")
-        from packaging.specifiers import SpecifierSet
-
-        SpecifierSet(self.manifest["core_version"])  # 解析失败会直接抛异常
-
-    def test_entry_script_exists(self) -> None:
-        self.assertTrue(MAIN_PATH.is_file(), "缺少 main.py 入口")
-
-    def test_requirements_match_manifest_dependencies(self) -> None:
-        # manifest.dependencies 与 requirements.txt 是两份手写副本，core 只读后者；
-        # 依赖实际安装走 requirements.txt，漂移后 manifest 会误导阅读者。
-        declared = {
-            line.strip()
-            for line in REQUIREMENTS_PATH.read_text(encoding="utf-8").splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        }
-        self.assertEqual(set(self.manifest.get("dependencies", [])), declared)
+# schema.json 是静态契约文件，导入期读一次即可；parametrize 的 id 取自它
+SCHEMA_DATA = load_json(SCHEMA_PATH)
+LEAVES = schema_leaf_keys(SCHEMA_DATA)
 
 
-class ReadmeTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.readme = README_PATH.read_text(encoding="utf-8")
-        self.manifest = load_json(MANIFEST_PATH)
-
-    def test_badge_version_matches_manifest(self) -> None:
-        badges = re.findall(r"badge/version-([0-9.]+)-", self.readme)
-        self.assertTrue(badges, "README 缺少版本徽章")
-        self.assertEqual(badges[0], self.manifest["version"])
-
-    def test_relative_links_resolve(self) -> None:
-        links = re.findall(r"\]\((?!https?://|#)([^)]+)\)", self.readme)
-        broken = [link for link in links if not (ROOT / link).exists()]
-        self.assertEqual(broken, [], f"README 中存在失效的相对链接: {broken}")
-
-    def test_documents_every_config_key(self) -> None:
-        leaves = schema_leaf_keys(load_json(SCHEMA_PATH))
-        missing = set(leaves) - readme_config_keys(self.readme)
-        self.assertEqual(missing, set(), f"README 配置表缺少字段: {sorted(missing)}")
-
-    def test_documents_every_tool(self) -> None:
-        tools = set(re.findall(r'@tool\(\s*"([a-z_]+)"', MAIN_PATH.read_text(encoding="utf-8")))
-        documented = set(re.findall(r"### 工具：`([a-z_]+)`", self.readme))
-        self.assertEqual(tools - documented, set(), "README 缺少工具文档")
-        self.assertEqual(documented - tools, set(), "README 文档了不存在的工具")
+@pytest.fixture(scope="module")
+def manifest() -> dict[str, Any]:
+    return load_json(MANIFEST_PATH)
 
 
-class SchemaTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self.schema = load_json(SCHEMA_PATH)
-
-    def test_sections_are_well_formed(self) -> None:
-        for name, section in self.schema.items():
-            with self.subTest(section=name):
-                self.assertEqual(section.get("type"), "section")
-                self.assertIn("name", section)
-                self.assertIsInstance(section.get("fields"), dict)
-                self.assertTrue(section["fields"], "空分节没有意义")
-
-    def test_fields_are_well_formed(self) -> None:
-        for key, field in schema_leaf_keys(self.schema).items():
-            with self.subTest(field=key):
-                self.assertIn(field.get("type"), FIELD_TYPES, f"{key} 的 type 非法")
-                self.assertIn("name", field, f"{key} 缺少 name")
-                self.assertIn("default", field, f"{key} 缺少 default")
-                if field["type"] == "select":
-                    self.assertIn("options", field, f"{key} 是 select 但缺少 options")
-
-    def test_schema_keys_match_code_usage(self) -> None:
-        # 双向校验：声明了没读 = 死配置；读了没声明 = 只能吃默认值。
-        leaves = set(schema_leaf_keys(self.schema))
-        code_keys = set(re.findall(r'_g\(\s*\w+\s*,\s*"([a-z_]+)"', MAIN_PATH.read_text(encoding="utf-8")))
-        self.assertEqual(leaves - code_keys, set(), "schema 声明了但代码未读取的配置")
-        self.assertEqual(code_keys - leaves, set(), "代码读取了但 schema 未声明的配置")
-
-    def test_switch_defaults_are_bool(self) -> None:
-        for key, field in schema_leaf_keys(self.schema).items():
-            if field["type"] == "switch":
-                with self.subTest(field=key):
-                    self.assertIsInstance(field["default"], bool)
+@pytest.fixture(scope="module")
+def readme() -> str:
+    return README_PATH.read_text(encoding="utf-8")
 
 
-class DocsTest(unittest.TestCase):
-    """docs/ 是 VitePress 站点，链接与配置项同属「文档漂移」高发区。"""
-
-    def test_config_reference_covers_all_keys(self) -> None:
-        reference = (ROOT / "docs" / "config-reference.md").read_text(encoding="utf-8")
-        leaves = schema_leaf_keys(load_json(SCHEMA_PATH))
-        missing = [key for key in leaves if key not in reference]
-        self.assertEqual(missing, [], f"docs/config-reference.md 缺少字段: {missing}")
-
-    def test_index_links_resolve(self) -> None:
-        index = (ROOT / "docs" / "index.md").read_text(encoding="utf-8")
-        links = re.findall(r"\]\(\./([a-z-]+)\)", index)
-        broken = [name for name in links if not (ROOT / "docs" / f"{name}.md").exists()]
-        self.assertEqual(broken, [], f"docs/index.md 存在失效链接: {broken}")
+@pytest.fixture(scope="module")
+def schema() -> dict[str, Any]:
+    return SCHEMA_DATA
 
 
-class PackageEntryTest(unittest.TestCase):
-    def test_init_does_not_eagerly_import_main(self) -> None:
-        """__init__.py 必须保持惰性。
-
-        main.py 在导入期依赖 core 与 jmcomic；若 __init__.py 在模块层做
-        `from .main import`，任何把它当顶层模块加载的收集器都会失败，把
-        「环境缺失」伪装成插件缺陷（CI 上 100% 复现）。
-        """
-        spec = importlib.util.spec_from_file_location("_jmdown_entry_probe", ROOT / "__init__.py")
-        self.assertIsNotNone(spec)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)  # type: ignore[union-attr]
-        self.assertIn("JMdownPlugin", module.__all__)
+# ── manifest.md 必需字段与语义 ────────────────────────────────────────
 
 
-if __name__ == "__main__":
-    unittest.main()
+@pytest.mark.parametrize(
+    "key",
+    ["display_name", "plugin_id", "version", "author", "description", "core_version", "repo"],
+)
+def test_manifest_has_required_key(manifest: dict[str, Any], key: str) -> None:
+    assert key in manifest, f"manifest 缺少必需字段 {key}"
+
+
+def test_plugin_id_is_safe_identifier(manifest: dict[str, Any]) -> None:
+    # plugin_id 会被用作配置文件名（data/config/plugins/<id>.json）与注册表键，
+    # 含路径分隔符或空格会静默写错位置。
+    # 注意：不能用「plugin_id == 目录名」来校验 —— CI checkout 的目录名是仓库名
+    # （KiraAI-jmdown-plugin），与安装目录（jmdown）本来就不一致。
+    assert re.fullmatch(r"[a-z][a-z0-9_]*", manifest["plugin_id"])
+
+
+def test_readme_clones_into_plugin_id_directory(manifest: dict[str, Any], readme: str) -> None:
+    assert re.search(rf"git clone \S+\s+{manifest['plugin_id']}\b", readme), (
+        "安装步骤必须把仓库克隆到与 plugin_id 同名的目录"
+    )
+
+
+def test_version_is_semver(manifest: dict[str, Any]) -> None:
+    assert re.fullmatch(r"\d+\.\d+\.\d+", manifest["version"])
+
+
+def test_core_version_is_specifier(manifest: dict[str, Any]) -> None:
+    if importlib.util.find_spec("packaging") is None:
+        pytest.skip("packaging 未安装")
+    from packaging.specifiers import SpecifierSet
+
+    SpecifierSet(manifest["core_version"])  # 解析失败会直接抛异常
+
+
+def test_entry_script_exists() -> None:
+    assert MAIN_PATH.is_file(), "缺少 main.py 入口"
+
+
+def test_requirements_match_manifest_dependencies(manifest: dict[str, Any]) -> None:
+    # manifest.dependencies 与 requirements.txt 是两份手写副本，core 只读后者；
+    # 依赖实际安装走 requirements.txt，漂移后 manifest 会误导阅读者。
+    declared = {
+        line.strip()
+        for line in REQUIREMENTS_PATH.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    assert set(manifest.get("dependencies", [])) == declared
+
+
+# ── README 与源码同步 ─────────────────────────────────────────────────
+
+
+def test_badge_version_matches_manifest(manifest: dict[str, Any], readme: str) -> None:
+    badges = re.findall(r"badge/version-([0-9.]+)-", readme)
+    assert badges, "README 缺少版本徽章"
+    assert badges[0] == manifest["version"]
+
+
+def test_relative_links_resolve(readme: str) -> None:
+    links = re.findall(r"\]\((?!https?://|#)([^)]+)\)", readme)
+    broken = [link for link in links if not (ROOT / link).exists()]
+    assert broken == [], f"README 中存在失效的相对链接: {broken}"
+
+
+def test_documents_every_config_key(readme: str) -> None:
+    missing = set(LEAVES) - readme_config_keys(readme)
+    assert missing == set(), f"README 配置表缺少字段: {sorted(missing)}"
+
+
+def test_documents_every_tool(readme: str) -> None:
+    tools = set(re.findall(r'@tool\(\s*"([a-z_]+)"', MAIN_PATH.read_text(encoding="utf-8")))
+    documented = set(re.findall(r"### 工具：`([a-z_]+)`", readme))
+    assert tools - documented == set(), "README 缺少工具文档"
+    assert documented - tools == set(), "README 文档了不存在的工具"
+
+
+# ── schema 结构与代码读取一致性 ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("section_name", list(SCHEMA_DATA))
+def test_sections_are_well_formed(schema: dict[str, Any], section_name: str) -> None:
+    section = schema[section_name]
+    assert section.get("type") == "section"
+    assert "name" in section
+    assert isinstance(section.get("fields"), dict)
+    assert section["fields"], "空分节没有意义"
+
+
+@pytest.mark.parametrize("key", list(LEAVES))
+def test_fields_are_well_formed(schema: dict[str, Any], key: str) -> None:
+    field = schema_leaf_keys(schema)[key]
+    assert field.get("type") in FIELD_TYPES, f"{key} 的 type 非法"
+    assert "name" in field, f"{key} 缺少 name"
+    assert "default" in field, f"{key} 缺少 default"
+    if field["type"] == "select":
+        assert "options" in field, f"{key} 是 select 但缺少 options"
+
+
+def test_schema_keys_match_code_usage(schema: dict[str, Any]) -> None:
+    # 双向校验：声明了没读 = 死配置；读了没声明 = 只能吃默认值。
+    leaves = set(schema_leaf_keys(schema))
+    code_keys = set(re.findall(r'_g\(\s*\w+\s*,\s*"([a-z_]+)"', MAIN_PATH.read_text(encoding="utf-8")))
+    assert leaves - code_keys == set(), "schema 声明了但代码未读取的配置"
+    assert code_keys - leaves == set(), "代码读取了但 schema 未声明的配置"
+
+
+def test_switch_defaults_are_bool() -> None:
+    bad = [key for key, field in LEAVES.items() if field["type"] == "switch" and not isinstance(field["default"], bool)]
+    assert bad == [], f"switch 字段默认值必须是 bool: {bad}"
+
+
+# ── docs/ 站点（VitePress）链接与字段覆盖 ─────────────────────────────
+
+
+def test_config_reference_covers_all_keys() -> None:
+    reference = (ROOT / "docs" / "config-reference.md").read_text(encoding="utf-8")
+    missing = [key for key in LEAVES if key not in reference]
+    assert missing == [], f"docs/config-reference.md 缺少字段: {missing}"
+
+
+def test_index_links_resolve() -> None:
+    index = (ROOT / "docs" / "index.md").read_text(encoding="utf-8")
+    links = re.findall(r"\]\(\./([a-z-]+)\)", index)
+    broken = [name for name in links if not (ROOT / "docs" / f"{name}.md").exists()]
+    assert broken == [], f"docs/index.md 存在失效链接: {broken}"
+
+
+# ── 包入口惰性 ────────────────────────────────────────────────────────
+
+
+def test_init_does_not_eagerly_import_main() -> None:
+    """__init__.py 必须保持惰性。
+
+    main.py 在导入期依赖 core 与 jmcomic；若 __init__.py 在模块层做
+    `from .main import`，任何把它当顶层模块加载的收集器都会失败，把
+    「环境缺失」伪装成插件缺陷（CI 上 100% 复现）。
+    """
+    spec = importlib.util.spec_from_file_location("_jmdown_entry_probe", ROOT / "__init__.py")
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "JMdownPlugin" in module.__all__
