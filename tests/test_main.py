@@ -39,6 +39,7 @@ def make_plugin() -> JMdownPlugin:
     p = JMdownPlugin(MagicMock(), {})
     p._max_concurrent = 2
     p._upload_timeout = 300
+    p._max_file_mb = 0  # 默认不限制，与 schema 一致
     p._allow_cross_session = False
     p._download_threads = 45
     p._notify_llm = True
@@ -143,10 +144,11 @@ class SendJmAlbumValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("JOB-x", ret)
 
     async def test_dead_task_superseded(self):
-        """超过 upload_timeout+120s 的运行中任务视为死任务，cancel 后允许重新提交。"""
+        """最近 upload_timeout+120s 内毫无进展的运行中任务视为死任务，cancel 后允许重新提交。"""
         p = make_plugin()
         state = TaskState(job_id="JOB-old", album_id=9, target="qq:dm:1")
         state.started_at = time.time() - (p._upload_timeout + 200)
+        state.progress_at = state.started_at  # 全程没有进展
         p._task_registry["JOB-old"] = state
         old_task = MagicMock(done=lambda: False)
         p._running_tasks[9] = old_task
@@ -159,6 +161,21 @@ class SendJmAlbumValidationTest(unittest.IsolatedAsyncioTestCase):
             ret = await p.send_jm_album(ev, 9, "qq:dm:1")
         self.assertIn("队列", ret)
         old_task.cancel.assert_called_once()
+
+    async def test_long_running_but_progressing_task_kept(self):
+        """总时长超阈值但仍在推进（如大文件 stream 上传）的任务不能被当死任务杀掉。"""
+        p = make_plugin()
+        state = TaskState(job_id="JOB-live", album_id=10, target="qq:dm:1")
+        state.started_at = time.time() - (p._upload_timeout + 600)
+        state.progress_at = time.time()  # 刚刚还有进度
+        p._task_registry["JOB-live"] = state
+        live_task = MagicMock(done=lambda: False)
+        p._running_tasks[10] = live_task
+        ev = MagicMock()
+        ev.session.sid = "qq:dm:1"
+        ret = await p.send_jm_album(ev, 10, "qq:dm:1")
+        self.assertIn("队列中", ret)
+        live_task.cancel.assert_not_called()
 
 
 class ZipCleanupTest(unittest.TestCase):
@@ -525,13 +542,24 @@ class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
             captured: dict = {}
 
             async def fake_send(
-                ctx, sid, user_id, file_path, is_group, group_id, timeout, progress_cb, chunk_size, send_timeout
+                ctx,
+                sid,
+                user_id,
+                file_path,
+                is_group,
+                group_id,
+                timeout,
+                progress_cb,
+                chunk_size,
+                send_timeout,
+                guard=None,
             ):
                 captured.update(
                     {
                         "timeout": timeout,
                         "send_timeout": send_timeout,
                         "file_path": file_path,
+                        "guard": guard,
                     }
                 )
                 return "ok"
@@ -543,7 +571,88 @@ class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(captured["timeout"], max(10, p._upload_timeout // 10))
             self.assertEqual(captured["send_timeout"], p._upload_timeout + 120)
+            # stream 必须带无进展看门狗，否则外层没有总时长闸门
+            self.assertIsNotNone(captured["guard"])
+            self.assertGreaterEqual(captured["guard"].window, 60)
             self.assertEqual(state.status, "done")
+
+    async def test_stall_watchdog_raises_on_no_progress(self):
+        """长时间没有 ack 才判失败，且信息里写清「停滞」而非「未收到响应」。"""
+        from jmdown.napcat_stream import StallGuard
+
+        p = make_plugin()
+        guard = StallGuard(window=0.3)
+
+        async def hang():
+            await asyncio.sleep(10)
+
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        with self.assertRaises(RuntimeError) as cm:
+            await p._upload_with_stall_watchdog(hang(), guard)
+        self.assertLess(loop.time() - t0, 5)  # 及时取消，不等满 10s
+        self.assertIn("停滞", str(cm.exception))
+        self.assertIn("没有收到任何实现端确认", str(cm.exception))
+
+    async def test_stall_watchdog_does_not_kill_slow_but_progressing(self):
+        """慢速但有 ack 的传输不能被误杀（方案 1/2 的核心缺陷）。"""
+        from jmdown.napcat_stream import StallGuard
+
+        p = make_plugin()
+        guard = StallGuard(window=0.3)
+
+        async def slow_but_alive():
+            for _ in range(6):
+                await asyncio.sleep(0.2)
+                guard.touch()  # 每次 ack 都算进展
+            return "ok"
+
+        self.assertEqual(await p._upload_with_stall_watchdog(slow_but_alive(), guard), "ok")
+
+    async def test_stall_watchdog_propagates_result_and_error(self):
+        from jmdown.napcat_stream import StallGuard
+
+        p = make_plugin()
+
+        async def boom():
+            raise ValueError("inner")
+
+        with self.assertRaises(ValueError):
+            await p._upload_with_stall_watchdog(boom(), StallGuard(window=5))
+
+
+class SizeLimitTest(unittest.IsolatedAsyncioTestCase):
+    """文件大小上限是插件侧配置闸门：0=不限制，>0 时发送前拦截并说明来源。"""
+
+    async def _deliver_with_size(self, size_bytes: int, limit_mb: int) -> str:
+        p = make_plugin()
+        p._max_file_mb = limit_mb
+        p._upload_method = "path"
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "a.pdf"
+            f.write_bytes(b"x" * size_bytes)
+
+            async def fake_send(ctx, user_id, file_path, **kw):
+                return "ok"
+
+            with patch("jmdown.file_send.send_file_standard", new=fake_send):
+                return await p._deliver("qq:dm:1", "1", False, None, str(f), None)
+
+    async def test_zero_means_unlimited(self):
+        self.assertEqual(await self._deliver_with_size(2 * 1024 * 1024, 0), "ok")
+
+    async def test_over_limit_rejected_with_explicit_reason(self):
+        with self.assertRaises(RuntimeError) as cm:
+            await self._deliver_with_size(2 * 1024 * 1024, 1)
+        msg = str(cm.exception)
+        self.assertIn("文件大小上限 1 MB", msg)
+        self.assertIn("不是 QQ 或实现端的上限", msg)
+        self.assertIn("设为 0", msg)
+
+    async def test_under_and_equal_limit_passes(self):
+        self.assertEqual(await self._deliver_with_size(1024 * 1024, 1), "ok")
 
 
 if __name__ == "__main__":
