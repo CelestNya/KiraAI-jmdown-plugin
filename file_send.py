@@ -13,9 +13,10 @@ NapCat / SnowLuma / LLOneBot / Lagrange.OneBot / OpenShamrock / go-cqhttp
 注意 OneBot 11 标准本身没有文件上传动作，``upload_*_file`` 是 go-cqhttp 引入、
 各家实现共同提供的扩展。
 
-**插件不预设体积上限**：三条方案都把文件原样交给实现端，由实现端的真实上限
-决定成败。失败时抛 ``FileSendError``，文本如实转述「实现端返回的失败响应」或
-「等待响应超时」，并附诊断指引；不臆断原因、不编造上限、不留空字符串。
+**插件默认不预设体积上限**：三条方案都把文件原样交给实现端，由实现端的真实
+上限决定成败（需要时可以配 ``upload.max_file_mb`` 打开插件侧闸门）。失败时抛
+``FileSendError``，文本如实转述「实现端返回的失败响应」或「等待响应超时」，
+并附诊断指引；不臆断原因、不编造上限、不留空字符串。
 
 标准动作是一次 ``send_action``，实现端内部转存不回报中间状态，OneBot 也没有
 进度事件，因此本模块不产生百分比：只用 ``progress_cb(None, ...)`` 告知
@@ -30,9 +31,10 @@ from pathlib import Path
 
 from .impl_support import (
     FileSendError,
-    diagnosis_hint,
     format_action_failure,
+    format_disconnect,
     format_no_response,
+    is_disconnect_error,
     is_ok_response,
 )
 from .napcat_stream import _find_qq_adapter, _fmt
@@ -99,10 +101,11 @@ async def send_file_standard(
         resp = await client.send_action(action, params, timeout=timeout)
     except TimeoutError as e:
         raise FileSendError(format_no_response(action, timeout, stage="标准上传", size_bytes=size)) from e
-    except OSError as e:
-        raise FileSendError(
-            f"标准上传连接异常（{type(e).__name__}: {e}），{action} 未收到实现端响应。{diagnosis_hint()}"
-        ) from e
+    except Exception as e:
+        # ConnectionClosed 不是 OSError，必须单独识别；其余异常原样上抛
+        if not is_disconnect_error(e):
+            raise
+        raise FileSendError(format_disconnect(action, "标准上传", e)) from e
 
     if not is_ok_response(resp):
         raise FileSendError(format_action_failure(action, resp, stage="标准上传"))

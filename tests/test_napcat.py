@@ -10,6 +10,7 @@ Run:
 from __future__ import annotations
 
 import hashlib
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -19,6 +20,8 @@ import _core_stub
 _core_stub.bootstrap()
 
 from jmdown.napcat_stream import (  # noqa: E402
+    StallGuard,
+    _call_action,
     _find_qq_adapter,
     _fmt,
     _make_stream_id,
@@ -26,6 +29,154 @@ from jmdown.napcat_stream import (  # noqa: E402
     send_file_via_stream,
     stream_upload_file,
 )
+
+
+class ConnectionClosed(Exception):
+    """模拟 websockets.exceptions.ConnectionClosed（注意：它不是 OSError）。"""
+
+
+class StallGuardTest(unittest.TestCase):
+    def test_expires_after_window(self):
+        g = StallGuard(window=0.05)
+        self.assertFalse(g.expired())
+        time.sleep(0.08)
+        self.assertTrue(g.expired())
+
+    def test_touch_resets(self):
+        g = StallGuard(window=0.05)
+        time.sleep(0.03)
+        g.touch()
+        self.assertFalse(g.expired())
+
+    def test_expect_sets_stage_and_window(self):
+        g = StallGuard(window=60)
+        g.expect("实现端发送", window=480)
+        self.assertEqual(g.stage, "实现端发送")
+        self.assertEqual(g.window, 480)
+
+    def test_window_has_floor(self):
+        self.assertGreater(StallGuard(window=0).window, 0)
+
+
+class CallActionErrorTest(unittest.IsolatedAsyncioTestCase):
+    """断连必须被包成有诊断的失败：ConnectionClosed 不是 OSError。"""
+
+    @staticmethod
+    def _client(boom):
+        client = MagicMock()
+        client.send_action = boom
+        return client
+
+    async def test_connection_closed_wrapped(self):
+        async def boom(action, params, timeout=10):
+            raise ConnectionClosed("no close frame received or sent")
+
+        with self.assertRaises(RuntimeError) as cm:
+            await _call_action(self._client(boom), "upload_private_file", {}, 5, stage="实现端发送")
+        msg = str(cm.exception)
+        self.assertIn("连接中断", msg)
+        self.assertIn("ConnectionClosed", msg)
+        self.assertIn("可核对", msg)
+
+    async def test_non_connection_error_passes_through(self):
+        async def boom(action, params, timeout=10):
+            raise ValueError("bug in client")
+
+        with self.assertRaises(ValueError):
+            await _call_action(self._client(boom), "upload_private_file", {}, 5, stage="实现端发送")
+
+    async def test_incomplete_chunk_note_only_mid_chunks(self):
+        """只有逐片阶段断连才可能留下残缺分片，其他阶段不能说这句话。"""
+
+        async def boom(action, params, timeout=10):
+            raise ConnectionClosed("closed")
+
+        with self.subTest(stage="分片 1/3"):
+            with self.assertRaises(RuntimeError) as cm:
+                await _call_action(self._client(boom), "upload_file_stream", {}, 5, stage="分片 1/3")
+            self.assertIn("残缺", str(cm.exception))
+
+        with self.subTest(stage="实现端发送"):
+            with self.assertRaises(RuntimeError) as cm:
+                await _call_action(self._client(boom), "upload_private_file", {}, 5, stage="实现端发送")
+            self.assertNotIn("残缺", str(cm.exception))
+
+
+class GuardInStreamTest(unittest.IsolatedAsyncioTestCase):
+    """分片链路要持续 touch guard，否则外层无进展看门狗会误杀活跃传输。"""
+
+    async def test_stream_upload_advances_guard_per_chunk(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            fp = Path(d) / "t.bin"
+            fp.write_bytes(b"x" * 40)
+            g = StallGuard(window=0.05)
+            idles: list[float] = []
+
+            async def fake_send(action, params, timeout=10):
+                idles.append(g.idle())  # 每片发出前，距上次实现端确认的间隔
+                time.sleep(0.08)  # 单次往返比窗口还慢，只有 ack 后 touch 才能救
+                if params.get("is_complete"):
+                    return {"status": "ok", "data": {"file_path": "/remote/t.bin"}}
+                return {"status": "ok", "data": {}}
+
+            client = MagicMock()
+            client.send_action = fake_send
+            remote = await stream_upload_file(client, str(fp), timeout=30, chunk_size=16, guard=g)
+
+            self.assertEqual(remote, "/remote/t.bin")
+            self.assertEqual(g.stage, "分片完成确认")
+            # 去掉逐片 touch 后这里的 idle 会累积到 0.08 并超过窗口
+            self.assertTrue(all(i < 0.05 for i in idles), f"分片 ack 未重置停滞计时: {idles}")
+
+    async def test_activity_hook_fires_per_ack(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            fp = Path(d) / "t.bin"
+            fp.write_bytes(b"x" * 40)
+            beats: list[float] = []
+
+            async def fake_send(action, params, timeout=10):
+                if params.get("is_complete"):
+                    return {"status": "ok", "data": {"file_path": "/remote/t.bin"}}
+                return {"status": "ok", "data": {}}
+
+            client = MagicMock()
+            client.send_action = fake_send
+            await stream_upload_file(
+                client, str(fp), timeout=30, chunk_size=16, on_activity=lambda: beats.append(time.time())
+            )
+            # 3 片 + 1 次完成确认 = 4 次 ack
+            self.assertEqual(len(beats), 4)
+
+    async def test_send_phase_widens_window(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as d:
+            fp = Path(d) / "t.bin"
+            fp.write_bytes(b"x" * 32)
+            g = StallGuard(window=1)
+
+            async def fake_send(action, params, timeout=10):
+                if params.get("is_complete"):
+                    return {"status": "ok", "data": {"file_path": "/remote/t.bin"}}
+                return {"status": "ok", "data": {}}
+
+            client = MagicMock()
+            client.send_action = fake_send
+            adapter = MagicMock()
+            adapter.info.platform = "QQ"
+            adapter.get_client.return_value = client
+            ctx = MagicMock()
+            ctx.adapter_mgr.get_adapters.return_value = {"qq": adapter}
+
+            await send_file_via_stream(
+                ctx, "qq:dm:1", "1", str(fp), timeout=30, send_timeout=420, chunk_size=16, guard=g
+            )
+            self.assertEqual(g.stage, "实现端发送")
+            self.assertGreaterEqual(g.window, 480)
 
 
 class FmtTest(unittest.TestCase):
