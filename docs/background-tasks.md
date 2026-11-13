@@ -47,21 +47,24 @@ class TaskState:
 
 ## 去重机制
 
-同一 album_id 正在运行则复用已有任务。超过 `upload_timeout + 120s` 视为死任务，取消旧任务允许重新提交：
+同一 album_id 正在运行则复用已有任务。最近 `upload_timeout + 120s` 内**毫无进展**才视为死任务，取消旧任务允许重新提交：
 
 ```python
 _task = self._running_tasks.get(album_id)
 if _task and not _task.done():
-    # 从 registry 反查运行中 TaskState 的 started_at
+    # 从 registry 反查运行中 TaskState
     _state = next((s for s in self._task_registry.values()
                    if s.album_id == album_id and s.status == "running"), None)
-    _elapsed = time.time() - (_state.started_at if _state else time.time())
+    # 看 progress_at 而不是 started_at：stream 大文件可能跑几十分钟但一直在推进
+    _elapsed = time.time() - max(_state.started_at, _state.progress_at) if _state else 0.0
     if _elapsed > self._upload_timeout + 120:
         _task.cancel()                       # 死任务，允许重新提交
         self._running_tasks.pop(album_id, None)
     else:
         return f"#{album_id} 已在下载队列中，标识码: {_state.job_id}\n{self._INSTRUCTION_NOTE}"
 ```
+
+`TaskState.touch()` 在下载 / 合成 / 上传进度回调里调用，是「还在动」的唯一证据。
 
 ## 并发限制
 

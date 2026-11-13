@@ -158,6 +158,20 @@ class SendFileStandardTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("peer closed", msg)
         self.assertIn("可核对", msg)
 
+    async def test_websocket_connection_closed_is_reported(self) -> None:
+        """ConnectionClosed 的 MRO 不含 OSError，旧 except OSError 抓不到它。"""
+
+        class ConnectionClosed(Exception):
+            pass
+
+        client = FakeClient(exc=ConnectionClosed("no close frame received or sent"))
+        with self.assertRaises(FileSendError) as ctx:
+            await send_file_standard(make_ctx(client), "123456", str(self.file), payload_mode="path")
+        msg = str(ctx.exception)
+        self.assertIn("连接中断", msg)
+        self.assertIn("ConnectionClosed", msg)
+        self.assertIn("未收到实现端响应", msg)
+
     async def test_missing_file_raises(self) -> None:
         with self.assertRaises(FileSendError):
             await send_file_standard(make_ctx(FakeClient()), "123456", str(self.file) + ".nope", payload_mode="path")

@@ -8,6 +8,7 @@ JMComic 下载器 — KiraAI 插件
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import secrets
 import string
@@ -26,7 +27,15 @@ from jmcomic.jm_config import JmModuleConfig
 from PIL import Image
 
 from .cache import CacheEntry, CacheIndex
-from .impl_support import DEFAULT_UPLOAD_METHOD, UPLOAD_METHODS, diagnosis_hint, format_no_response
+from .impl_support import (
+    DEFAULT_UPLOAD_METHOD,
+    UPLOAD_METHODS,
+    FileSendError,
+    diagnosis_hint,
+    format_no_response,
+    format_size_limit,
+    format_stalled,
+)
 
 
 class JMDownError(RuntimeError):
@@ -88,7 +97,13 @@ class TaskState:
     result: dict | None = None
     error: str | None = None
     started_at: float = field(default_factory=time.time)
+    # 最近一次进度更新时刻：stream 方案总时长不可预估，判「死任务」只能看有没有进展
+    progress_at: float = field(default_factory=time.time, repr=False)
     elapsed: float = 0.0
+
+    def touch(self) -> None:
+        """记录一次进展（阶段推进 / 进度回调），供死任务判定使用。"""
+        self.progress_at = time.time()
 
 
 def _parse_target(target: str) -> tuple[str, bool, str | None]:
@@ -413,6 +428,7 @@ class JMdownPlugin(BasePlugin):
         self._pdf_quality: int = 85
         self._upload_timeout: int = 300
         self._chunk_size: int = 512 * 1024
+        self._max_file_mb: int = 0  # 0 = 不限制（默认）
         self._upload_method: str = DEFAULT_UPLOAD_METHOD
         self._allow_cross_session: bool = False
 
@@ -508,6 +524,8 @@ class JMdownPlugin(BasePlugin):
         self._pdf_quality = int(_g(quality, "pdf_quality", 85))
         self._download_threads = max(1, int(_g(dl, "download_threads", 45)))
         self._upload_timeout = max(1, int(_g(upload, "upload_timeout", 300)))
+        # 0 = 不限制：默认把文件原样交给实现端，由实现端真实上限决定成败
+        self._max_file_mb = max(0, int(_g(upload, "max_file_mb", 0)))
         self._chunk_size = min(
             16 * 1024 * 1024,  # 单片上限：避免单帧过大，不是文件大小闸门
             max(4096, int(_g(upload, "chunk_size", 512 * 1024))),
@@ -543,8 +561,9 @@ class JMdownPlugin(BasePlugin):
         logger.info("JMdown 已终止")
 
     async def _upload_with_watchdog(self, upload_coro, timeout: int) -> str:
-        """上传带硬超时。外层 wait_for 兜底，超时取消整个上传。
+        """标准方案（path / base64）的硬超时兜底。
 
+        这两条方案只有一次 ``send_action``，总时长上限有意义，超时即失败。
         内层超时若已带动作名等信息就保留原文，只补上诊断指引；空消息则换成
         带方案名与超时秒数的完整说明，避免 LLM 收到空白失败原因。
         """
@@ -559,6 +578,41 @@ class JMdownPlugin(BasePlugin):
             )
             raise TimeoutError(detail) from e
 
+    async def _upload_with_stall_watchdog(self, upload_coro, guard) -> str:
+        """stream 专用：只在「长时间没有任何实现端确认」时判失败。
+
+        总时长不可预估——``分片数 × 每片往返 + 实现端转存``，100MB 文件在
+        250KB/s 上行下就要 7 分钟以上。用固定总时长当闸门会把进度一路正常的
+        传输误判成「未收到响应」，属于我们自己制造的误导性失败。内层每片、
+        完成帧、发送阶段各有单次超时，这里只兜「真卡死」。
+        """
+        task = asyncio.ensure_future(upload_coro)
+        try:
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=2)
+                if task in done:
+                    return task.result()
+                if guard.expired():
+                    idle, stage, window = guard.idle(), guard.stage, guard.window
+                    task.cancel()
+                    with contextlib.suppress(BaseException):
+                        await task
+                    raise FileSendError(format_stalled(stage, idle, window))
+        except asyncio.CancelledError:
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+            raise
+
+    def _check_size_limit(self, file_path: str) -> None:
+        """配置闸门：max_file_mb > 0 时拦截超大文件，说明这是插件侧限制。"""
+        if self._max_file_mb <= 0:
+            return
+        size = Path(file_path).stat().st_size
+        limit = self._max_file_mb * 1024 * 1024
+        if size > limit:
+            raise FileSendError(format_size_limit(size, self._max_file_mb, self._upload_method))
+
     async def _deliver(self, sid, user_id, is_group, group_id, upload_path, progress_cb) -> str:
         """按 upload_method 在三种方案间分派。
 
@@ -567,10 +621,13 @@ class JMdownPlugin(BasePlugin):
         """
         file_path = str(Path(upload_path).resolve())
         ul_timeout = self._upload_timeout + 120
+        self._check_size_limit(file_path)
 
         if self._upload_method == "stream":
-            from .napcat_stream import send_file_via_stream
+            from .napcat_stream import StallGuard, send_file_via_stream
 
+            chunk_timeout = max(10, self._upload_timeout // 10)
+            guard = StallGuard(window=max(60, chunk_timeout * 2))
             coro = send_file_via_stream(
                 self.ctx,
                 sid,
@@ -578,25 +635,26 @@ class JMdownPlugin(BasePlugin):
                 file_path,
                 is_group,
                 group_id,
-                max(10, self._upload_timeout // 10),
+                chunk_timeout,
                 progress_cb=progress_cb,
                 chunk_size=self._chunk_size,
                 send_timeout=ul_timeout,
+                guard=guard,
             )
-        else:
-            from .file_send import send_file_standard
+            return await self._upload_with_stall_watchdog(coro, guard)
 
-            coro = send_file_standard(
-                self.ctx,
-                user_id,
-                file_path,
-                is_group=is_group,
-                group_id=group_id,
-                timeout=ul_timeout,
-                progress_cb=progress_cb,
-                payload_mode=self._upload_method,
-            )
+        from .file_send import send_file_standard
 
+        coro = send_file_standard(
+            self.ctx,
+            user_id,
+            file_path,
+            is_group=is_group,
+            group_id=group_id,
+            timeout=ul_timeout,
+            progress_cb=progress_cb,
+            payload_mode=self._upload_method,
+        )
         return await self._upload_with_watchdog(coro, timeout=ul_timeout)
 
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
@@ -647,26 +705,21 @@ class JMdownPlugin(BasePlugin):
             return f"当前下载任务过多（{len(self._running_tasks)}/{self._max_concurrent}），请等待现有任务完成后再试"
 
         # 去重: 同一 album_id 正在运行则复用
-        # 超过 upload_timeout+120s 视为死任务，允许覆盖
+        # 最近 upload_timeout+120s 内没有任何进展才视为死任务，允许覆盖。
+        # stream 方案可能跑很久（分片数 × 每片往返），只看 started_at 会把活跃任务误杀。
         _task = self._running_tasks.get(album_id)
         if _task and not _task.done():
-            _elapsed = time.time() - next(
-                (
-                    s.started_at
-                    for s in self._task_registry.values()
-                    if s.album_id == album_id and s.status == "running"
-                ),
-                time.time(),
+            _state = next(
+                (s for s in self._task_registry.values() if s.album_id == album_id and s.status == "running"),
+                None,
             )
+            _elapsed = time.time() - max(_state.started_at, _state.progress_at) if _state else 0.0
             if _elapsed > self._upload_timeout + 120:
                 _task.cancel()
                 self._running_tasks.pop(album_id, None)
                 # 死任务，fallthrough 到重新提交
             else:
-                existing = next(
-                    (s for s in self._task_registry.values() if s.album_id == album_id and s.status == "running"),
-                    None,
-                )
+                existing = _state
                 if existing:
                     return f"#{album_id} 已在下载队列中，标识码: {existing.job_id}\n{self._INSTRUCTION_NOTE}"
                 return f"#{album_id} 已在下载队列中\n{self._INSTRUCTION_NOTE}"
@@ -917,6 +970,7 @@ class JMdownPlugin(BasePlugin):
 
                 async def _cache_upload_progress(pct: int | None, note: str):
                     state.phases["上传"] = _upload_phase(pct, note)
+                    state.touch()
 
                 password = ""
                 upload_path = cached.pdf_path
@@ -954,6 +1008,7 @@ class JMdownPlugin(BasePlugin):
             def _dl_progress(pct: int, spd: str):
                 with self._phase_lock:
                     state.phases["下载"] = f"{pct}% ({spd})"
+                state.touch()
 
             album_obj, image_dir, images, title, description = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -974,6 +1029,7 @@ class JMdownPlugin(BasePlugin):
 
             def _pdf_progress(pct: int):
                 state.phases["合成"] = f"{pct}%"
+                state.touch()
 
             size = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -1017,6 +1073,7 @@ class JMdownPlugin(BasePlugin):
 
             async def _upload_progress(pct: int | None, note: str):
                 state.phases["上传"] = _upload_phase(pct, note)
+                state.touch()
 
             send_result = await self._deliver(sid, user_id, is_group, group_id, upload_path, _upload_progress)
             state.phases["上传"] = "已完成"
