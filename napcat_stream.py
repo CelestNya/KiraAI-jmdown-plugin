@@ -17,6 +17,7 @@ import hashlib
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from core.plugin import logger
@@ -91,7 +92,8 @@ async def _call_action(
         # ConnectionClosed 不是 OSError，必须单独识别；其余异常原样上抛
         if not is_disconnect_error(e):
             raise
-        raise FileSendError(format_disconnect(action, stage, e)) from e
+        # 只有逐片发送阶段断连才会留下残缺分片
+        raise FileSendError(format_disconnect(action, stage, e, mid_chunks=stage.startswith("分片 "))) from e
 
 
 # SnowLuma 用 /^[A-Za-z0-9_-]{1,128}$/ 校验 stream_id；NapCat 不限制。
@@ -128,6 +130,7 @@ async def stream_upload_file(
     progress_cb=None,
     chunk_size: int = 512 * 1024,
     guard: StallGuard | None = None,
+    on_activity: Callable[[], None] | None = None,
 ) -> str:
     """upload_file_stream: 分片上传 → 返回实现端远端 temp 路径.
 
@@ -137,18 +140,26 @@ async def stream_upload_file(
     progress_cb: async callable(pct: int | None, note: str)，分片期间给真实百分比
     chunk_size: 分片大小, 默认 512KB（单片上限由 main._load_config 控制）
     guard: 无进展看门狗计时器；每次实现端确认后 touch（进度回调不可靠时也能看到进展）
+    on_activity: 每次实现端确认后回调一次，供上层刷新「任务还活着」的时间戳
+        （进度回调只有 ~20 次，不足以证明存活）
     """
+    chunk_timeout = max(60, timeout * 2)
     file_size = os.path.getsize(file_path)
     total_chunks = (file_size + chunk_size - 1) // chunk_size
     stream_id = _make_stream_id(file_path)
-    if guard:
-        guard.expect(f"分片 1/{total_chunks}", window=max(60, timeout * 2))
 
     logger.info(f"Stream upload start: {file_path} ({total_chunks} chunks, {_fmt(file_size)})")
 
     # expected_sha256 必须为完整文件 hash, 所有分片传同一个值
     # 分块读 + 丢线程, 避免一次性读入大文件并阻塞事件循环
+    # 本地算 hash 期间不会有任何实现端 ack，单独记一个阶段，算完再重置分片计时器，
+    # 否则大文件 hash 超过停滞阈值就会被误判成「传输停滞」。
+    if guard:
+        guard.expect("本地计算 SHA256", window=chunk_timeout)
     full_sha256 = await asyncio.to_thread(_sha256_file, file_path)
+    if guard:
+        guard.expect(f"分片 1/{total_chunks}", window=chunk_timeout)
+
     remote_path: str | None = None
     t0 = time.time()
     report_every = max(1, total_chunks // 20)  # 约 20 次通知
@@ -174,9 +185,11 @@ async def stream_upload_file(
                 raise FileSendError(format_action_failure("upload_file_stream", resp, stage=stage))
             if guard:
                 if i + 1 < total_chunks:
-                    guard.expect(f"分片 {i + 2}/{total_chunks}", window=max(60, timeout * 2))
+                    guard.expect(f"分片 {i + 2}/{total_chunks}", window=chunk_timeout)
                 else:
                     guard.touch()
+            if on_activity:
+                on_activity()
 
             # 报告进度（用全程平均速度，单chunk瞬时速度未使用）
             if progress_cb and (i == 0 or i == total_chunks - 1 or i % report_every == 0):
@@ -189,7 +202,7 @@ async def stream_upload_file(
     # ── 所有块发送完成，通知实现端组装文件 ──
     logger.info("All chunks sent, signaling completion ...")
     if guard:
-        guard.expect("分片完成确认", window=max(60, timeout * 2))
+        guard.expect("分片完成确认", window=chunk_timeout)
     complete_resp = await _call_action(
         client,
         "upload_file_stream",
@@ -200,6 +213,8 @@ async def stream_upload_file(
     )
     if not is_ok_response(complete_resp):
         raise FileSendError(format_action_failure("upload_file_stream", complete_resp, stage="分片完成确认"))
+    if on_activity:
+        on_activity()
     remote_path = complete_resp.get("data", {}).get("file_path", "")
     if not remote_path:
         raise FileSendError(
@@ -221,6 +236,7 @@ async def send_file_via_stream(
     progress_cb=None,
     chunk_size: int = 512 * 1024,
     guard: StallGuard | None = None,
+    on_activity: Callable[[], None] | None = None,
 ) -> str:
     """完整链路: stream upload → upload_private_file / upload_group_file.
 
@@ -233,6 +249,7 @@ async def send_file_via_stream(
         实现端处理大文件发送（temp 转存 → QQ 服务器）可能远超分片超时，
         若沿用 timeout 会把已成功的发送误判为超时。默认取 timeout 值。
     guard: 无进展看门狗计时器，发送阶段会换成更宽的阈值（该阶段没有中间 ack）。
+    on_activity: 每次实现端确认后回调一次，供上层刷新任务存活时间戳。
     """
     # 动态查找 platform=QQ 的 adapter，不硬编码注册名
     adapter = _find_qq_adapter(ctx.adapter_mgr)
@@ -244,7 +261,7 @@ async def send_file_via_stream(
     file_name = os.path.basename(file_path)
 
     # 1. 分片上传到实现端 temp
-    remote_path = await stream_upload_file(client, file_path, timeout, progress_cb, chunk_size, guard)
+    remote_path = await stream_upload_file(client, file_path, timeout, progress_cb, chunk_size, guard, on_activity)
     file_size = os.path.getsize(file_path)
     logger.info(f"Stream upload OK: {file_name} ({_fmt(file_size)}) → {remote_path}")
 

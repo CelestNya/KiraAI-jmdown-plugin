@@ -177,7 +177,8 @@ LLM → 告知用户任务已提交
 - 后台任务（Background task）绕过 KiraAI tool 60s 超时限制
 - `content_query` 开关关闭时，搜索、元信息查询、完成通知中的元数据全部隐藏，仅保留下载发送功能
 - 上传用 `asyncio.wait_for` 做外层硬超时，避免 WS 半开连接卡死任务；`stream` 例外——总时长不可预估，改用**无进展看门狗**（连续 `max(60, 单片超时×2)` 秒无 ack 才判失败）
-- 死任务检测：最近 `upload_timeout+120s` 内毫无进展（`TaskState.progress_at`）才视为死任务并取消，避免把跑得久但仍在推进的大文件上传误杀
+- 死任务检测：最近 `upload_timeout+120s` 内毫无进展（`TaskState.progress_at`，每个分片 ack 都会刷新）才视为死任务并取消，避免把跑得久但仍在推进的大文件上传误杀
+- 同 ID 并发提交原子占位（`_pending_aids`）：预查元信息是 await，不占位会重复下载同一本并丢掉先注册的任务
 
 ## 项目结构
 

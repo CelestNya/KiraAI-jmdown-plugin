@@ -203,31 +203,47 @@ def is_disconnect_error(e: BaseException) -> bool:
     return any(cls.__name__.startswith("ConnectionClosed") for cls in type(e).__mro__)
 
 
-def format_disconnect(action: str, resp_stage: str, err: BaseException) -> str:
-    """连接中断：说明中断位置与被中断的动作，不臆断成超限。"""
-    return (
-        f"{resp_stage}连接中断（{type(err).__name__}: {err}），{action} 未收到实现端响应。"
-        "这是传输链路断开，不是实现端明确拒绝；分片方案下已发送的分片可能是残缺的。"
-        f"{diagnosis_hint()}"
+def format_disconnect(action: str, resp_stage: str, err: BaseException, *, mid_chunks: bool = False) -> str:
+    """连接中断：说明中断位置与被中断的动作，不臆断成超限。
+
+    ``mid_chunks`` 只在分片逐片发送阶段为真——只有那时断连才会留下残缺分片；
+    标准单次动作和「分片完成确认之后的发送阶段」都不能这么说，否则又在给
+    LLM 编造传输状态。
+    """
+    tail = (
+        "传输链路断开，不是实现端明确拒绝；分片方案下已发出的分片可能是残缺的。"
+        if mid_chunks
+        else ("传输链路断开，不是实现端明确拒绝。")
     )
+    return f"{resp_stage}连接中断（{type(err).__name__}: {err}），{action} 未收到实现端响应。{tail}{diagnosis_hint()}"
 
 
 def format_stalled(stage: str, idle: float, window: float) -> str:
-    """无进展看门狗触发：说明「多久没有收到确认」，不对原因下结论。"""
+    """无进展看门狗触发：说明「多久没有收到确认」，不对原因下结论。
+
+    不能断言「不是体积超限」：部分实现（如 NapCat）对超限请求体是**静默丢弃**
+    且不回包，此时「没有 ack」恰恰可能是分片帧超限造成的。
+    """
     return (
         f"{stage}停滞：连续 {idle:.0f}s 没有收到任何实现端确认（无进展阈值 {window:g}s）。"
-        "这不是体积超限，也不是实现端明确拒绝；常见原因是实现端进程卡死或掉线、"
-        "上行链路中断、实现端在转存阶段卡住。"
+        "具体原因无法从客户端判定：可能是实现端进程卡死或掉线、上行链路中断、"
+        "实现端在转存阶段卡住，**也可能是实现端静默丢弃了超出其请求体 / 帧上限的分片**"
+        "（部分实现超限时不返回失败响应）。"
         f"{diagnosis_hint()}"
     )
 
 
 def format_size_limit(size_bytes: int, limit_mb: int, method: str) -> str:
-    """配置闸门拦截：明确说这是插件侧设置，不是 QQ / 实现端的上限。"""
+    """配置闸门拦截：明确说这是插件侧设置，不是 QQ / 实现端的上限。
+
+    建议值取「向上取整的 MB」，不能四舍五入：1.2MB 的文件被 1MB 上限拦下时，
+    四舍五入会得到「调到 ≥ 1 MB」，照着改依然被拦。
+    """
+    need_mb = -(-size_bytes // (1024 * 1024))  # ceil(size / MB)
     return (
         f"发送前拦截：文件 {size_bytes / 1024 / 1024:.1f} MB 超过插件配置的"
         f"「文件大小上限 {limit_mb} MB」（upload.max_file_mb）。"
         "这是插件侧的保护性闸门，**不是 QQ 或实现端的上限**。"
-        f"要发送就把它调到 ≥ {size_bytes / 1024 / 1024:.0f} MB，或设为 0 取消限制；"
+        f"要发送就把它调到 ≥ {need_mb} MB，或设为 0 取消限制；"
         f"当前方案 {method}。"
     )
