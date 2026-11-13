@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](requirements.txt)
-[![Version](https://img.shields.io/badge/version-2.10.0-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.10.1-blue)](manifest.json)
 
 **jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 按所选上传方案发送文件到 QQ。
 
@@ -131,7 +131,8 @@ LLM → 告知用户任务已提交
 | `pdf_quality` | integer | 85 | JPEG 质量 (1-100) |
 | **上传** ||||
 | `upload_method` | string | path | 三选一：`path`=标准动作+本地绝对路径（同机，6 种实现全支持）/ `base64`=标准动作+内联内容（跨机，+33%，仅 4 种实现支持）/ `stream`=分片（仅 NapCat、SnowLuma，唯一有真实上传百分比）。下拉框的 hint 有逐项说明 |
-| `upload_timeout` | integer | 300 | 上传超时秒数；超时未收到实现端响应时给出带诊断指引的失败说明 |
+| `upload_timeout` | integer | 300 | 上传超时秒数。`path`/`base64` 是单次动作的总超时；`stream` 是**单片**超时（取 1/10），发送阶段独立用 +120s |
+| `max_file_mb` | integer | 0 | 插件侧文件大小上限（MB），**0 = 不限制（默认）**。>0 时超限文件发送前被拒，信息里会说明这是插件闸门、不是实现端上限。主要用来限 `base64` 的内存峰值（约为文件的 5.3 倍） |
 | `chunk_size` | integer | 524288 | 仅 `stream` 生效：分片字节数，默认 512KB |
 | **缓存** ||||
 | `max_cache` | integer | 10 | 最多缓存几本 PDF |
@@ -175,8 +176,9 @@ LLM → 告知用户任务已提交
 - 下载/合成显示真实百分比；上传阶段仅 `stream` 分片期间有真实百分比，`path` / `base64` 及实现端发送阶段一律显示「进度未知」
 - 后台任务（Background task）绕过 KiraAI tool 60s 超时限制
 - `content_query` 开关关闭时，搜索、元信息查询、完成通知中的元数据全部隐藏，仅保留下载发送功能
-- 上传用 `asyncio.wait_for` 做外层硬超时，避免 WS 半开连接卡死任务
-- 死任务检测：超过 `upload_timeout+120s` 未完成的任务自动取消，允许重新提交
+- 上传用 `asyncio.wait_for` 做外层硬超时，避免 WS 半开连接卡死任务；`stream` 例外——总时长不可预估，改用**无进展看门狗**（连续 `max(60, 单片超时×2)` 秒无 ack 才判失败）
+- 死任务检测：最近 `upload_timeout+120s` 内毫无进展（`TaskState.progress_at`，每个分片 ack 都会刷新）才视为死任务并取消，避免把跑得久但仍在推进的大文件上传误杀
+- 同 ID 并发提交原子占位（`_pending_aids`）：预查元信息是 await，不占位会重复下载同一本并丢掉先注册的任务
 
 ## 项目结构
 

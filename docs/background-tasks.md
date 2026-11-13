@@ -47,15 +47,16 @@ class TaskState:
 
 ## 去重机制
 
-同一 album_id 正在运行则复用已有任务。超过 `upload_timeout + 120s` 视为死任务，取消旧任务允许重新提交：
+同一 album_id 正在运行则复用已有任务。最近 `upload_timeout + 120s` 内**毫无进展**才视为死任务，取消旧任务允许重新提交：
 
 ```python
 _task = self._running_tasks.get(album_id)
 if _task and not _task.done():
-    # 从 registry 反查运行中 TaskState 的 started_at
+    # 从 registry 反查运行中 TaskState
     _state = next((s for s in self._task_registry.values()
                    if s.album_id == album_id and s.status == "running"), None)
-    _elapsed = time.time() - (_state.started_at if _state else time.time())
+    # 看 progress_at 而不是 started_at：stream 大文件可能跑几十分钟但一直在推进
+    _elapsed = time.time() - max(_state.started_at, _state.progress_at) if _state else 0.0
     if _elapsed > self._upload_timeout + 120:
         _task.cancel()                       # 死任务，允许重新提交
         self._running_tasks.pop(album_id, None)
@@ -63,12 +64,44 @@ if _task and not _task.done():
         return f"#{album_id} 已在下载队列中，标识码: {_state.job_id}\n{self._INSTRUCTION_NOTE}"
 ```
 
-## 并发限制
+`TaskState.touch()` 是「还在动」的唯一证据，三个来源都会调用它：
 
-`max_concurrent` 配置控制同时最多任务数：
+| 来源 | 频率 | 覆盖阶段 |
+|------|------|----------|
+| 下载 / 合成进度回调 | 按 jmcomic / img2pdf 上报 | 下载、合成 |
+| 上传进度回调（`progress_cb`） | 仅 ~20 次 | stream 分片期间 |
+| `on_activity` 钩子（`_deliver` → `stream_upload_file`） | **每次实现端 ack** | 分片逐片 + 完成确认 |
+
+第三项是必需的：进度回调被节流成 20 次，20 分钟的上传可能一次回调都落不到
+`upload_timeout + 120s` 判定窗口内，只靠它仍会把活跃任务判死。
+
+### 为什么需要原子占位
+
+`send_jm_album` 在校验完并发/去重之后还要 `await` 预查元信息。如果不在这个 await
+之前占位，两个同 ID 的请求会**同时**通过去重检查，各自切一个任务下载同一份内容，
+后注册的那个还会覆盖 `_running_tasks[album_id]`，前一个任务从此不再受管。
 
 ```python
-if len(self._running_tasks) >= self._max_concurrent:
+if album_id in self._pending_aids:
+    return f"#{album_id} 正在校验，请稍后重试"
+
+self._pending_aids.add(album_id)          # 占位
+try:
+    await asyncio.wait_for(asyncio.to_thread(_fetch_album_meta, album_id), timeout=10)
+    state = TaskState(...)
+    self._task_registry[job_id] = state
+    self._running_tasks[album_id] = asyncio.create_task(self._task_runner(state))
+finally:
+    self._pending_aids.discard(album_id)  # 注册后立即释放，中间没有 await
+```
+
+## 并发限制
+
+`max_concurrent` 配置控制同时最多任务数，**占位中的任务也计入**，否则一串不同
+album_id 的并发提交可以绕过上限：
+
+```python
+if len(self._running_tasks) + len(self._pending_aids) >= self._max_concurrent:
     return f"当前下载任务过多（{n}/{self._max_concurrent}），请等待现有任务完成后再试"
 ```
 

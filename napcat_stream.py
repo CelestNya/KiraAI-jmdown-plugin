@@ -17,6 +17,7 @@ import hashlib
 import os
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from core.plugin import logger
@@ -25,7 +26,9 @@ from .impl_support import (
     FileSendError,
     diagnosis_hint,
     format_action_failure,
+    format_disconnect,
     format_no_response,
+    is_disconnect_error,
     is_ok_response,
     response_summary,
 )
@@ -40,6 +43,43 @@ class NapCatConfigError(FileSendError):
 CHUNK_SIZE = 512 * 1024  # 单片默认 512KB；实测 NapCat 4.18.14 maxPayload=50MiB，非文件大小闸门
 
 
+class StallGuard:
+    """记录「最近一次收到实现端确认」的时刻，供上层做无进展判定。
+
+    分片方案的总时长不可预估——``分片数 × 每片往返 + 实现端转存``，100MB 在
+    250KB/s 上就超过 7 分钟。用固定总时长当闸门，只会把进度一路正常的传输
+    误判成超时（而文案还写着「未收到响应」，属于我们自己的假话）。真正要抓的
+    是「长时间没有任何 ack」这一种卡死，所以这里只维护时间戳和阈值。
+    """
+
+    __slots__ = ("_last", "_window", "stage")
+
+    def __init__(self, window: float):
+        self._last = time.monotonic()
+        self._window = max(0.01, float(window))
+        self.stage = "启动"
+
+    @property
+    def window(self) -> float:
+        return self._window
+
+    def expect(self, stage: str, window: float | None = None) -> None:
+        """进入新阶段：换个名字、换阈值，并重置计时（阶段切换本身算进展）。"""
+        self.stage = stage
+        if window is not None:
+            self._window = max(0.01, float(window))
+        self.touch()
+
+    def touch(self) -> None:
+        self._last = time.monotonic()
+
+    def idle(self) -> float:
+        return time.monotonic() - self._last
+
+    def expired(self) -> bool:
+        return self.idle() > self._window
+
+
 async def _call_action(
     client, action: str, params: dict, timeout: float, *, stage: str, size_bytes: int | None = None
 ) -> dict:
@@ -48,10 +88,12 @@ async def _call_action(
         return await client.send_action(action, params, timeout=timeout)
     except TimeoutError as e:
         raise FileSendError(format_no_response(action, timeout, stage=stage, size_bytes=size_bytes)) from e
-    except OSError as e:
-        raise FileSendError(
-            f"{stage}连接异常（{type(e).__name__}: {e}），{action} 未收到实现端响应。{diagnosis_hint()}"
-        ) from e
+    except Exception as e:
+        # ConnectionClosed 不是 OSError，必须单独识别；其余异常原样上抛
+        if not is_disconnect_error(e):
+            raise
+        # 只有逐片发送阶段断连才会留下残缺分片
+        raise FileSendError(format_disconnect(action, stage, e, mid_chunks=stage.startswith("分片 "))) from e
 
 
 # SnowLuma 用 /^[A-Za-z0-9_-]{1,128}$/ 校验 stream_id；NapCat 不限制。
@@ -87,6 +129,8 @@ async def stream_upload_file(
     timeout: int = 300,
     progress_cb=None,
     chunk_size: int = 512 * 1024,
+    guard: StallGuard | None = None,
+    on_activity: Callable[[], None] | None = None,
 ) -> str:
     """upload_file_stream: 分片上传 → 返回实现端远端 temp 路径.
 
@@ -95,7 +139,11 @@ async def stream_upload_file(
     timeout: 单次 send_action 超时
     progress_cb: async callable(pct: int | None, note: str)，分片期间给真实百分比
     chunk_size: 分片大小, 默认 512KB（单片上限由 main._load_config 控制）
+    guard: 无进展看门狗计时器；每次实现端确认后 touch（进度回调不可靠时也能看到进展）
+    on_activity: 每次实现端确认后回调一次，供上层刷新「任务还活着」的时间戳
+        （进度回调只有 ~20 次，不足以证明存活）
     """
+    chunk_timeout = max(60, timeout * 2)
     file_size = os.path.getsize(file_path)
     total_chunks = (file_size + chunk_size - 1) // chunk_size
     stream_id = _make_stream_id(file_path)
@@ -104,7 +152,14 @@ async def stream_upload_file(
 
     # expected_sha256 必须为完整文件 hash, 所有分片传同一个值
     # 分块读 + 丢线程, 避免一次性读入大文件并阻塞事件循环
+    # 本地算 hash 期间不会有任何实现端 ack，单独记一个阶段，算完再重置分片计时器，
+    # 否则大文件 hash 超过停滞阈值就会被误判成「传输停滞」。
+    if guard:
+        guard.expect("本地计算 SHA256", window=chunk_timeout)
     full_sha256 = await asyncio.to_thread(_sha256_file, file_path)
+    if guard:
+        guard.expect(f"分片 1/{total_chunks}", window=chunk_timeout)
+
     remote_path: str | None = None
     t0 = time.time()
     report_every = max(1, total_chunks // 20)  # 约 20 次通知
@@ -128,6 +183,13 @@ async def stream_upload_file(
             resp = await _call_action(client, "upload_file_stream", params, timeout, stage=stage, size_bytes=file_size)
             if not is_ok_response(resp):
                 raise FileSendError(format_action_failure("upload_file_stream", resp, stage=stage))
+            if guard:
+                if i + 1 < total_chunks:
+                    guard.expect(f"分片 {i + 2}/{total_chunks}", window=chunk_timeout)
+                else:
+                    guard.touch()
+            if on_activity:
+                on_activity()
 
             # 报告进度（用全程平均速度，单chunk瞬时速度未使用）
             if progress_cb and (i == 0 or i == total_chunks - 1 or i % report_every == 0):
@@ -139,6 +201,8 @@ async def stream_upload_file(
 
     # ── 所有块发送完成，通知实现端组装文件 ──
     logger.info("All chunks sent, signaling completion ...")
+    if guard:
+        guard.expect("分片完成确认", window=chunk_timeout)
     complete_resp = await _call_action(
         client,
         "upload_file_stream",
@@ -149,6 +213,8 @@ async def stream_upload_file(
     )
     if not is_ok_response(complete_resp):
         raise FileSendError(format_action_failure("upload_file_stream", complete_resp, stage="分片完成确认"))
+    if on_activity:
+        on_activity()
     remote_path = complete_resp.get("data", {}).get("file_path", "")
     if not remote_path:
         raise FileSendError(
@@ -169,6 +235,8 @@ async def send_file_via_stream(
     send_timeout: int | None = None,
     progress_cb=None,
     chunk_size: int = 512 * 1024,
+    guard: StallGuard | None = None,
+    on_activity: Callable[[], None] | None = None,
 ) -> str:
     """完整链路: stream upload → upload_private_file / upload_group_file.
 
@@ -180,6 +248,8 @@ async def send_file_via_stream(
     send_timeout: 发送 API（upload_private_file/upload_group_file）超时。
         实现端处理大文件发送（temp 转存 → QQ 服务器）可能远超分片超时，
         若沿用 timeout 会把已成功的发送误判为超时。默认取 timeout 值。
+    guard: 无进展看门狗计时器，发送阶段会换成更宽的阈值（该阶段没有中间 ack）。
+    on_activity: 每次实现端确认后回调一次，供上层刷新任务存活时间戳。
     """
     # 动态查找 platform=QQ 的 adapter，不硬编码注册名
     adapter = _find_qq_adapter(ctx.adapter_mgr)
@@ -191,16 +261,19 @@ async def send_file_via_stream(
     file_name = os.path.basename(file_path)
 
     # 1. 分片上传到实现端 temp
-    remote_path = await stream_upload_file(client, file_path, timeout, progress_cb, chunk_size)
+    remote_path = await stream_upload_file(client, file_path, timeout, progress_cb, chunk_size, guard, on_activity)
     file_size = os.path.getsize(file_path)
     logger.info(f"Stream upload OK: {file_name} ({_fmt(file_size)}) → {remote_path}")
 
     # 2. 用实现端 temp 路径发给目标用户（发送 API 用独立的 send_timeout，
     #    避免大文件发送处理超时被误判为失败）
     #    这一阶段实现端内部转存，协议不回报进度，不能继续挂在 100%
+    send_to = send_timeout if send_timeout is not None else timeout
+    if guard:
+        # 该阶段没有中间 ack，阈值必须覆盖实现端转存耗时，否则会误杀正在转存的大文件
+        guard.expect("实现端发送", window=send_to + 60)
     if progress_cb:
         await progress_cb(None, "实现端发送中")
-    send_to = send_timeout if send_timeout is not None else timeout
     if is_group and group_id:
         action = "upload_group_file"
         params = {"group_id": group_id, "file": remote_path, "name": file_name}
