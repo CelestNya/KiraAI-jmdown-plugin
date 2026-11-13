@@ -96,11 +96,31 @@ def _parse_target(target: str) -> tuple[str, bool, Optional[str]]:
 
 ```bash
 cd /path/to/KiraAI/data/plugins/jmdown
-python -m pytest -q                          # 全量（含协议 e2e），约 4s
+python -m pytest -q                          # 全量（含协议 e2e），约 10s
 python -m pytest -q tests/test_upload_e2e.py  # 只跑上传 e2e
 python -m pytest -q -k manifest              # 只跑元数据契约
 python -m pytest -q -x --lf                  # 失败即停 + 只重跑上次失败
 ```
+
+### 测试风格
+
+全部用例是 pytest 函数风格，不用 `unittest`：
+
+| 需求 | 写法 |
+|------|------|
+| 共享上下文（临时文件、插件实例） | 模块内 fixture，作用域按需 `function` / `module` |
+| 参数矩阵（原先的 `subTest`） | `@pytest.mark.parametrize`，每个组合是独立用例、独立报错 |
+| 断言（原先的 `assertEqual` 等） | 裸 `assert`，pytest 会重写断言表达式并给出 diff |
+| 异步用例（原先的 `IsolatedAsyncioTestCase`） | 直接 `async def test_*`，`pytest.ini` 已开 `asyncio_mode = auto` |
+| 期望异常 | `with pytest.raises(X) as cm: ...`，再断言文本 |
+
+要求：
+- 所有测试函数标参数与返回类型（`-> None`），fixture 标返回类型；
+- 每个用例只断言一件事的失败语义，参数化后不要用循环+`subTest` 把多个组合塞回一个用例
+  —— 那样失败时只报第一个，还得手动重跑才能看到其余的。
+
+`pytest` 与 `pytest-asyncio` 在 CI 里钉版本（见 `ci.yml`）：异步用例的收集与 loop
+作用域行为随版本变，不钉会让「本地绿、CI 红」。
 
 ### 为什么测试不依赖 KiraAI 运行时
 
