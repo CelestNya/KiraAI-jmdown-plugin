@@ -205,11 +205,13 @@ LLM → 告知用户任务已提交
 ## 开发
 
 ```bash
-python -m pytest -q          # 128 个用例（含 11 个协议 e2e），约 4s
+python -m pytest -q          # 242 个用例（含 15 个协议 e2e），约 10s
 ruff check .                 # 规则见 ruff.toml
 ruff format --check .
 ```
 
+测试统一用 pytest 函数风格：模块级 fixture 造运行时上下文，`@pytest.mark.parametrize`
+展开矩阵，异步用例直接写 `async def`（pytest.ini 已开 `asyncio_mode = auto`）。
 测试通过 `tests/_core_stub.py` 注入 `core` 桩，因此不需要完整 KiraAI 运行时。
 `tests/test_upload_e2e.py` 会起本地假 OneBot WS 服务端，验证插件发出的真实协议帧
 （含分片重组与 SHA256），同样不需要 NapCat / QQ 在线。

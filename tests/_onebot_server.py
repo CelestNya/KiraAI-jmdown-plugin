@@ -89,7 +89,7 @@ class FakeOneBotServer:
     def actions(self) -> list[str]:
         return [r["action"] for r in self.requests]
 
-    async def _handle(self, ws, *args) -> None:
+    async def _handle(self, ws: Any, *args: Any) -> None:
         request = getattr(ws, "request", None)
         headers = getattr(request, "headers", {}) if request is not None else {}
         auth = headers.get("Authorization", "") if headers else ""
