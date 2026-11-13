@@ -14,8 +14,10 @@ import secrets
 import string
 import threading
 import time
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import img2pdf
 import jmcomic
@@ -36,6 +38,9 @@ from .impl_support import (
     format_size_limit,
     format_stalled,
 )
+
+if TYPE_CHECKING:
+    from .napcat_stream import StallGuard
 
 
 class JMDownError(RuntimeError):
@@ -435,6 +440,7 @@ class JMdownPlugin(BasePlugin):
         # 后台任务系统
         self._task_registry: dict[str, TaskState] = {}  # job_id → state
         self._running_tasks: dict[int, asyncio.Task] = {}  # album_id → task
+        self._pending_aids: set[int] = set()  # 已占位、仍在预查元信息的 album_id
         self._orphan_aids: set[int] = set()
         # 持有 fire-and-forget 后台 task 的强引用，避免被 GC 中途回收
         self._bg_tasks: set[asyncio.Task] = set()
@@ -578,7 +584,7 @@ class JMdownPlugin(BasePlugin):
             )
             raise TimeoutError(detail) from e
 
-    async def _upload_with_stall_watchdog(self, upload_coro, guard) -> str:
+    async def _upload_with_stall_watchdog(self, upload_coro: Coroutine[Any, Any, str], guard: StallGuard) -> str:
         """stream 专用：只在「长时间没有任何实现端确认」时判失败。
 
         总时长不可预估——``分片数 × 每片往返 + 实现端转存``，100MB 文件在
@@ -604,24 +610,40 @@ class JMdownPlugin(BasePlugin):
                 await task
             raise
 
-    def _check_size_limit(self, file_path: str) -> None:
-        """配置闸门：max_file_mb > 0 时拦截超大文件，说明这是插件侧限制。"""
+    async def _check_size_limit(self, file_path: str) -> None:
+        """配置闸门：max_file_mb > 0 时拦截超大文件，说明这是插件侧限制。
+
+        stat 丢线程：规则要求文件 IO 走异步；同时把 stat 失败包成 FileSendError，
+        否则文件缺失/不可读时 LLM 收到的是裸 `FileNotFoundError`，没有可操作信息。
+        """
         if self._max_file_mb <= 0:
             return
-        size = Path(file_path).stat().st_size
-        limit = self._max_file_mb * 1024 * 1024
-        if size > limit:
+        try:
+            size = await asyncio.to_thread(lambda: Path(file_path).stat().st_size)
+        except OSError as e:
+            raise FileSendError(f"待发送文件不可读（{file_path}）：{type(e).__name__}: {e}") from e
+        if size > self._max_file_mb * 1024 * 1024:
             raise FileSendError(format_size_limit(size, self._max_file_mb, self._upload_method))
 
-    async def _deliver(self, sid, user_id, is_group, group_id, upload_path, progress_cb) -> str:
+    async def _deliver(
+        self,
+        sid: str,
+        user_id: str,
+        is_group: bool,
+        group_id: str | None,
+        upload_path,
+        progress_cb,
+        on_activity: Callable[[], None] | None = None,
+    ) -> str:
         """按 upload_method 在三种方案间分派。
 
         path / base64 走同一组标准动作（区别只在 file 参数形态），stream 走分片。
         任务流程不该知道这些细节，调用方只关心进度回调与结果文本。
+        ``on_activity`` 用于 stream 每次 ack 时刷新任务存活时间戳。
         """
         file_path = str(Path(upload_path).resolve())
         ul_timeout = self._upload_timeout + 120
-        self._check_size_limit(file_path)
+        await self._check_size_limit(file_path)
 
         if self._upload_method == "stream":
             from .napcat_stream import StallGuard, send_file_via_stream
@@ -640,6 +662,7 @@ class JMdownPlugin(BasePlugin):
                 chunk_size=self._chunk_size,
                 send_timeout=ul_timeout,
                 guard=guard,
+                on_activity=on_activity,
             )
             return await self._upload_with_stall_watchdog(coro, guard)
 
@@ -700,8 +723,14 @@ class JMdownPlugin(BasePlugin):
         if album_id in self._orphan_aids:
             return f"#{album_id} 上一个任务正在退出清理，请稍后重试"
 
-        # 全局并发限制
-        if len(self._running_tasks) >= self._max_concurrent:
+        # 原子占位：预查元信息是 await，不先占位的话「检查-注册」之间有窗口，
+        # 两个同 ID 请求会同时通过去重检查，各自切一个任务下载同一份内容，
+        # 后者还会覆盖 _running_tasks，导致前一个任务彻底失控。
+        if album_id in self._pending_aids:
+            return f"#{album_id} 正在校验，请稍后重试"
+
+        # 全局并发限制（含已占位、仍在预查的任务）
+        if len(self._running_tasks) + len(self._pending_aids) >= self._max_concurrent:
             return f"当前下载任务过多（{len(self._running_tasks)}/{self._max_concurrent}），请等待现有任务完成后再试"
 
         # 去重: 同一 album_id 正在运行则复用
@@ -737,23 +766,31 @@ class JMdownPlugin(BasePlugin):
         if session is not None and target != session.sid and not self._allow_cross_session:
             return f"错误: 不允许转发到其他会话（当前: {session.sid}，目标: {target}）"
 
-        # 预查本子是否存在，10s 超时兜底（网络波动 fallthrough 到后台任务）
+        # 从这里到注册任务之间有 await，先占位，保证「检查-注册」是原子的
+        self._pending_aids.add(album_id)
+        # 从这里到注册任务之间有 await，先占位，保证「检查-注册」是原子的
+        self._pending_aids.add(album_id)
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(_fetch_album_meta, album_id),
-                timeout=10,
-            )
-        except JMDownError as e:
-            return f"错误: {e}"
-        except Exception as e:
-            # 超时或网络异常不阻断提交，交给后台任务重试
-            logger.debug(f"#{album_id} 预查失败，fallthrough 到后台任务: {e}")
+            # 预查本子是否存在，10s 超时兜底（网络波动 fallthrough 到后台任务）
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_album_meta, album_id),
+                    timeout=10,
+                )
+            except JMDownError as e:
+                return f"错误: {e}"
+            except Exception as e:
+                # 超时或网络异常不阻断提交，交给后台任务重试
+                logger.debug(f"#{album_id} 预查失败，fallthrough 到后台任务: {e}")
 
-        state = TaskState(job_id=job_id, album_id=album_id, target=target)
-        self._task_registry[job_id] = state
+            state = TaskState(job_id=job_id, album_id=album_id, target=target)
+            self._task_registry[job_id] = state
 
-        task = asyncio.create_task(self._task_runner(state))
-        self._running_tasks[album_id] = task
+            task = asyncio.create_task(self._task_runner(state))
+            self._running_tasks[album_id] = task
+        finally:
+            # 注册完成后立即释放占位；与注册之间没有 await，不存在窗口
+            self._pending_aids.discard(album_id)
 
         logger.info(f"#{album_id} 入队列 → {job_id}")
         return f"任务已加入队列\n标识码: {job_id}\n{self._INSTRUCTION_NOTE}"
@@ -981,7 +1018,9 @@ class JMdownPlugin(BasePlugin):
                     upload_path = str(zip_path.resolve())
                     state.phases["合成"] = "ZIP"
 
-                send_result = await self._deliver(sid, user_id, is_group, group_id, upload_path, _cache_upload_progress)
+                send_result = await self._deliver(
+                    sid, user_id, is_group, group_id, upload_path, _cache_upload_progress, on_activity=state.touch
+                )
                 state.phases["上传"] = "已完成"
                 state.phases["发送"] = "已完成"
                 state.status = "done"
@@ -1075,7 +1114,9 @@ class JMdownPlugin(BasePlugin):
                 state.phases["上传"] = _upload_phase(pct, note)
                 state.touch()
 
-            send_result = await self._deliver(sid, user_id, is_group, group_id, upload_path, _upload_progress)
+            send_result = await self._deliver(
+                sid, user_id, is_group, group_id, upload_path, _upload_progress, on_activity=state.touch
+            )
             state.phases["上传"] = "已完成"
 
             # ── 5. 发送 ──

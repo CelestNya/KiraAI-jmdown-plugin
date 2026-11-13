@@ -553,6 +553,7 @@ class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
                 chunk_size,
                 send_timeout,
                 guard=None,
+                on_activity=None,
             ):
                 captured.update(
                     {
@@ -560,6 +561,7 @@ class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
                         "send_timeout": send_timeout,
                         "file_path": file_path,
                         "guard": guard,
+                        "on_activity": on_activity,
                     }
                 )
                 return "ok"
@@ -574,6 +576,9 @@ class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
             # stream 必须带无进展看门狗，否则外层没有总时长闸门
             self.assertIsNotNone(captured["guard"])
             self.assertGreaterEqual(captured["guard"].window, 60)
+            # 每片 ack 必须能刷新任务存活时间戳（进度回调只有 ~20 次，不足以证明存活）
+            self.assertIs(captured["on_activity"].__self__, state)
+            self.assertIs(captured["on_activity"].__func__, TaskState.touch)
             self.assertEqual(state.status, "done")
 
     async def test_stall_watchdog_raises_on_no_progress(self):
@@ -590,24 +595,33 @@ class UploadTimeoutTest(unittest.IsolatedAsyncioTestCase):
         t0 = loop.time()
         with self.assertRaises(RuntimeError) as cm:
             await p._upload_with_stall_watchdog(hang(), guard)
-        self.assertLess(loop.time() - t0, 5)  # 及时取消，不等满 10s
-        self.assertIn("停滞", str(cm.exception))
-        self.assertIn("没有收到任何实现端确认", str(cm.exception))
+        idle = loop.time() - t0
+        self.assertLess(idle, 5)  # 及时取消，不等满 10s
+        self.assertGreaterEqual(idle, 1.9, "必须真的经过至少一次轮询才判定")
+        msg = str(cm.exception)
+        self.assertIn("停滞", msg)
+        self.assertIn("没有收到任何实现端确认", msg)
+        # 超限帧会被部分实现静默丢弃，"不是体积超限" 是不能下的结论
+        self.assertNotIn("这不是体积超限", msg)
+        self.assertIn("静默丢弃", msg)
 
     async def test_stall_watchdog_does_not_kill_slow_but_progressing(self):
-        """慢速但有 ack 的传输不能被误杀（方案 1/2 的核心缺陷）。"""
+        """慢速但有 ack 的传输不能被误杀，且必须跨过看门狗的轮询周期。"""
         from jmdown.napcat_stream import StallGuard
 
         p = make_plugin()
-        guard = StallGuard(window=0.3)
+        guard = StallGuard(window=1.0)  # 阈值 > 每次间隔，但总时长 > 轮询周期 2s
 
         async def slow_but_alive():
-            for _ in range(6):
-                await asyncio.sleep(0.2)
+            for _ in range(8):
+                await asyncio.sleep(0.4)
                 guard.touch()  # 每次 ack 都算进展
             return "ok"
 
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
         self.assertEqual(await p._upload_with_stall_watchdog(slow_but_alive(), guard), "ok")
+        self.assertGreater(loop.time() - t0, 2, "总时长必须超过 2s 轮询周期才算验证到")
 
     async def test_stall_watchdog_propagates_result_and_error(self):
         from jmdown.napcat_stream import StallGuard
@@ -653,6 +667,63 @@ class SizeLimitTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_under_and_equal_limit_passes(self):
         self.assertEqual(await self._deliver_with_size(1024 * 1024, 1), "ok")
+
+    async def test_advice_is_actionable_for_marginal_overflow(self):
+        """1.2MB 被 1MB 拦下时，建议值必须能真的放行（不能四舍五入回 1MB）。"""
+        with self.assertRaises(RuntimeError) as cm:
+            await self._deliver_with_size(int(1.2 * 1024 * 1024), 1)
+        self.assertIn("调到 ≥ 2 MB", str(cm.exception))
+
+    async def test_missing_file_yields_actionable_error(self):
+        """max_file_mb>0 时也不能把裸 FileNotFoundError 抛给 LLM。"""
+        p = make_plugin()
+        p._max_file_mb = 1
+        p._upload_method = "path"
+        with self.assertRaises(RuntimeError) as cm:
+            await p._deliver("qq:dm:1", "1", False, None, "/nonexistent/x.pdf", None)
+        self.assertIn("待发送文件不可读", str(cm.exception))
+
+
+class ConcurrentSubmitTest(unittest.IsolatedAsyncioTestCase):
+    """Sourcery #4：预查元信息是 await，「检查-注册」之间必须原子占位。"""
+
+    async def test_same_album_twice_during_precheck(self):
+        p = make_plugin()
+        p._max_concurrent = 5
+        ev = MagicMock()
+        ev.session.sid = "qq:dm:1"
+
+        def slow_meta(_aid: int) -> dict:
+            time.sleep(0.3)  # 放大预查窗口
+            return {}
+
+        with (
+            patch("jmdown.main._fetch_album_meta", side_effect=slow_meta),
+            patch.object(JMdownPlugin, "_task_runner", new=AsyncMock()),
+        ):
+            first, second = await asyncio.gather(
+                p.send_jm_album(ev, 77, "qq:dm:1"),
+                p.send_jm_album(ev, 77, "qq:dm:1"),
+            )
+
+        joined = [r for r in (first, second) if "加入队列" in r]
+        blocked = [r for r in (first, second) if "正在校验" in r]
+        self.assertEqual(len(joined), 1, f"重复提交应只建一个任务: {first!r} / {second!r}")
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(len(p._running_tasks), 1)
+        self.assertEqual(len(p._task_registry), 1)
+        self.assertEqual(p._pending_aids, set(), "占位必须释放")
+
+    async def test_pending_is_released_after_meta_error(self):
+        p = make_plugin()
+        ev = MagicMock()
+        ev.session.sid = "qq:dm:1"
+
+        with patch("jmdown.main._fetch_album_meta", side_effect=JMDownError("不存在")):
+            ret = await p.send_jm_album(ev, 78, "qq:dm:1")
+
+        self.assertIn("错误", ret)
+        self.assertEqual(p._pending_aids, set())
 
 
 if __name__ == "__main__":
