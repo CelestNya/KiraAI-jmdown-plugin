@@ -141,24 +141,34 @@ def test_icon_field_resolves_to_local_file(manifest: dict[str, Any], key: str) -
 @pytest.mark.parametrize("key", ICON_KEYS)
 def test_icon_asset_suits_the_card_size(manifest: dict[str, Any], key: str) -> None:
     # 卡片里图标按 40×40、object-fit:contain 显示，所以源图必须是正方形
-    # （非正方形会在 contain 下留白），且边长不低于 128（4x 屏需要 160px）。
+    # （非正方形会在 contain 下留白），且边长不低于 160（40px × 4x 屏）。
     target = ROOT / manifest[key]
     if target.suffix.lower() == ".svg":
         root = ET.parse(target).getroot()
         assert root.tag == "{http://www.w3.org/2000/svg}svg", f"{key} 根元素不是 svg"
-        assert root.get("viewBox"), f"{key} 缺少 viewBox，缩放时会变形"
+        # 仅判非空不够：viewBox="0 0 0 0" 也是非空，却完全无法缩放。
+        viewbox = (root.get("viewBox") or "").replace(",", " ").split()
+        assert len(viewbox) == 4, f"{key} 的 viewBox 必须是四个数值，当前 {root.get('viewBox')!r}"
+        _, _, vb_w, vb_h = (float(v) for v in viewbox)
+        assert vb_w > 0 and vb_h > 0, f"{key} 的 viewBox 宽高必须为正，当前 {root.get('viewBox')!r}"
         # SVG 由前端 <img src> 加载，脚本不会执行；但它能携带外部引用，
-        # 一个 href 指向远端地址就足以把插件面板变成外联信标。
-        raw = target.read_text(encoding="utf-8").lower()
-        assert "<script" not in raw, f"{key} 不能包含脚本"
-        assert 'href="http' not in raw, f"{key} 不能外链外部资源"
+        # 一个 href 指向远端地址就足以把插件面板变成外联信标。逐元素查属性，
+        # 而不是匹配字符串——单引号与协议相对写法（//host/x.svg）能绕过后者。
+        assert "<script" not in target.read_text(encoding="utf-8").lower(), f"{key} 不能包含脚本"
+        for el in root.iter():
+            for attr, value in el.attrib.items():
+                if attr.rsplit("}", 1)[-1] != "href":
+                    continue
+                ref = value.strip()
+                external = re.match(r"(?i)^(?:[a-z][a-z0-9+.-]*:|//|/)", ref)
+                assert ref.startswith("#") or external is None, f"{key} 的 href 不能指向插件外，当前 {ref!r}"
         return
 
     from PIL import Image
 
     with Image.open(target) as im:
         assert im.width == im.height, f"{key} 必须是正方形，当前 {im.width}×{im.height}"
-        assert im.width >= 128, f"{key} 分辨率过低（{im.width}px），40px 卡片在 4x 屏上需要 160px"
+        assert im.width >= 160, f"{key} 分辨率过低（{im.width}px），40px 卡片在 4x 屏上需要 160px"
 
 
 # ── README 与源码同步 ─────────────────────────────────────────────────
