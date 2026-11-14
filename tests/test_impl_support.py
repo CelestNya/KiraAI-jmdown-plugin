@@ -207,6 +207,21 @@ def test_base64_ceiling_note_is_empty_without_a_size() -> None:
     assert base64_ceiling_note(40 * 1024 * 1024, None) == ""
 
 
+def test_base64_failure_points_at_impls_that_reject_inline() -> None:
+    # 默认值改成 base64 之后，Lagrange.OneBot / go-cqhttp 升级即失效；
+    # 失败文案必须能自己说出原因，不能让人以为是体积或权限问题。
+    msg = format_no_response("upload_private_file", 300, stage="标准上传", size_bytes=1024, payload_mode="base64")
+    assert "Lagrange.OneBot" in msg
+    assert "go-cqhttp" in msg
+    assert "path" in msg
+
+
+def test_path_failure_does_not_blame_base64_support() -> None:
+    # diagnosis_hint 本来就列出全部实现名，所以这里比对的是「不解析 base64」那条特征文案
+    msg = format_no_response("upload_private_file", 300, stage="标准上传", size_bytes=1024, payload_mode="path")
+    assert "不解析 base64://" not in msg
+
+
 @pytest.mark.parametrize(
     "msg",
     [

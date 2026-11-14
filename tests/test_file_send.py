@@ -186,6 +186,28 @@ async def test_oversize_base64_timeout_reports_the_known_ceiling(
     assert "stream" in msg
 
 
+async def test_explicit_base64_failure_reaches_the_hint_through_send_file_standard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """明确失败响应也要走同一条透传链路。
+
+    直接调 ``format_action_failure`` 的用例只能证明函数本身对，证明不了
+    ``send_file_standard`` 还在把 size / payload_mode 传下去——所以这条从外层打进去。
+    """
+    big = tmp_path / "big.pdf"
+    with open(big, "wb") as f:
+        f.truncate(40 * 1024 * 1024)
+    monkeypatch.setattr("jmdown.file_send._read_base64", lambda _p: "QUJD")
+
+    client = FakeClient(status="failed")
+    with pytest.raises(FileSendError) as cm:
+        await send_file_standard(make_ctx(client), "123456", str(big), payload_mode="base64")
+    msg = str(cm.value)
+    assert "失败响应" in msg
+    assert "37.5 MB" in msg
+    assert "Lagrange.OneBot" in msg, "不解析 base64 的实现方也要被点名"
+
+
 async def test_connection_error_is_reported_not_swallowed(pdf: Path) -> None:
     client = FakeClient(exc=ConnectionResetError("peer closed"))
     with pytest.raises(FileSendError) as cm:
@@ -280,6 +302,22 @@ async def test_watchdog_timeout_is_not_an_empty_string(plugin: JMdownPlugin) -> 
     assert msg.strip()
     assert "未收到实现端响应" in msg
     assert "1s" in msg
+
+
+async def test_watchdog_timeout_carries_the_base64_ceiling_hint(plugin: JMdownPlugin) -> None:
+    """总看门狗常常比内层超时更早触发，它的文案必须也能带上体积信息。"""
+
+    async def never_finishes() -> str:
+        await asyncio.sleep(3600)
+        return "unreachable"
+
+    with pytest.raises(TimeoutError) as cm:
+        await plugin._upload_with_watchdog(
+            never_finishes(), timeout=1, size_bytes=40 * 1024 * 1024, payload_mode="base64"
+        )
+    msg = str(cm.value)
+    assert "37.5 MB" in msg
+    assert "40.0 MB" in msg
 
 
 # ── 配置解析与旧配置迁移 ──────────────────────────────────────────────

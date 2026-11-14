@@ -203,6 +203,21 @@ def base64_ceiling_note(size_bytes: int | None, payload_mode: str | None) -> str
     )
 
 
+def base64_support_note(payload_mode: str | None) -> str:
+    """base64 载荷失败时提醒「有些实现根本不解析内联」。
+
+    这条与体积无关，所以不看 size：``Lagrange.OneBot`` / ``go-cqhttp`` 的
+    ``file`` 只接受本地路径，任何体积的 ``base64://`` 都会失败。默认值改成
+    base64 之后，这两家的用户升级即失效，失败文案必须能自己说出原因。
+    """
+    if payload_mode != "base64":
+        return ""
+    return (
+        f" 若实现端是 {PATH_ONLY_IMPLS}，它们不解析 base64://（file 只接受本地路径），"
+        "任何体积都会失败；请把上传方案改为 path 并确保实现端与插件同机。"
+    )
+
+
 def format_action_failure(
     action: str,
     resp: dict,
@@ -215,7 +230,7 @@ def format_action_failure(
     return (
         f"{stage}失败：实现端对 {action} 返回了失败响应（{response_summary(resp)}）。"
         "插件默认不设本地体积上限（可配 upload.max_file_mb），上限由实现端决定。"
-        f"{diagnosis_hint()}{base64_ceiling_note(size_bytes, payload_mode)}"
+        f"{diagnosis_hint()}{base64_support_note(payload_mode)}{base64_ceiling_note(size_bytes, payload_mode)}"
     )
 
 
@@ -233,7 +248,7 @@ def format_no_response(
         f"{stage}失败：{action} 在 {timeout:g}s 内未收到实现端响应{size}。"
         "这不是实现端明确拒绝；可能原因包括请求体被实现方丢弃/超限、连接中断、"
         "或实现端转存耗时超过超时设置。插件无法从客户端区分，需查实现端日志确认。"
-        f"{diagnosis_hint()}{base64_ceiling_note(size_bytes, payload_mode)}"
+        f"{diagnosis_hint()}{base64_support_note(payload_mode)}{base64_ceiling_note(size_bytes, payload_mode)}"
     )
 
 
