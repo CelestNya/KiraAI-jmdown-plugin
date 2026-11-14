@@ -20,6 +20,7 @@ from jmdown.impl_support import (
     SUPPORTED_IMPLS,
     UPLOAD_METHODS,
     ImplSupport,
+    base64_ceiling_note,
     diagnosis_hint,
     format_action_failure,
     format_no_response,
@@ -158,6 +159,52 @@ def test_no_response_reports_facts_not_a_fabricated_limit() -> None:
     assert "Max payload size exceeded" in msg
     assert "文件太大" not in msg
     assert "超过内联上限" not in msg
+
+
+# ── base64 内联的已知上限：只在该载荷 + 该体积区间出现 ────────────────
+
+
+def test_base64_oversize_timeout_names_the_known_ceiling() -> None:
+    # 40MB 已越过 NapCat 实测的 37.5MB 线（maxPayload 50MiB × 3/4）
+    msg = format_no_response(
+        "upload_private_file", 300, stage="标准上传", size_bytes=40 * 1024 * 1024, payload_mode="base64"
+    )
+    assert "37.5 MB" in msg
+    assert "40.0 MB" in msg
+    assert "stream" in msg
+    assert "可能" in msg, "不能替实现端断言「你超限了」"
+
+
+def test_base64_small_file_gets_no_ceiling_noise() -> None:
+    msg = format_no_response(
+        "upload_private_file", 300, stage="标准上传", size_bytes=5 * 1024 * 1024, payload_mode="base64"
+    )
+    assert "37.5 MB" not in msg
+
+
+def test_path_payload_never_gets_the_base64_ceiling_note() -> None:
+    # path 不内联，体积再大也不受内联上限约束
+    msg = format_no_response(
+        "upload_private_file", 300, stage="标准上传", size_bytes=80 * 1024 * 1024, payload_mode="path"
+    )
+    assert "37.5 MB" not in msg
+
+
+def test_base64_ceiling_note_also_rides_on_explicit_failure() -> None:
+    msg = format_action_failure(
+        "upload_group_file",
+        {"status": "failed", "retcode": 1200, "message": "bad request"},
+        stage="标准上传",
+        size_bytes=64 * 1024 * 1024,
+        payload_mode="base64",
+    )
+    assert "37.5 MB" in msg
+    assert "64.0 MB" in msg
+
+
+def test_base64_ceiling_note_is_empty_without_a_size() -> None:
+    assert base64_ceiling_note(None, "base64") == ""
+    assert base64_ceiling_note(40 * 1024 * 1024, None) == ""
 
 
 @pytest.mark.parametrize(

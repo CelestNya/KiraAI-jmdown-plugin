@@ -100,7 +100,9 @@ async def send_file_standard(
     try:
         resp = await client.send_action(action, params, timeout=timeout)
     except TimeoutError as e:
-        raise FileSendError(format_no_response(action, timeout, stage="标准上传", size_bytes=size)) from e
+        raise FileSendError(
+            format_no_response(action, timeout, stage="标准上传", size_bytes=size, payload_mode=payload_mode)
+        ) from e
     except Exception as e:
         # ConnectionClosed 不是 OSError，必须单独识别；其余异常原样上抛
         if not is_disconnect_error(e):
@@ -108,6 +110,8 @@ async def send_file_standard(
         raise FileSendError(format_disconnect(action, "标准上传", e)) from e
 
     if not is_ok_response(resp):
-        raise FileSendError(format_action_failure(action, resp, stage="标准上传"))
+        raise FileSendError(
+            format_action_failure(action, resp, stage="标准上传", size_bytes=size, payload_mode=payload_mode)
+        )
 
     return f"已通过标准上传发送 ({_fmt(size)}, 载荷={payload_mode})"

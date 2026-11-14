@@ -163,6 +163,27 @@ async def test_timeout_with_empty_message_still_yields_useful_error(pdf: Path) -
     assert "300s" in msg
     assert "Max payload size exceeded" in msg
     assert "文件太大" not in msg
+    # 小文件不该被扣上「撞了内联上限」的帽子
+    assert "37.5 MB" not in msg
+
+
+async def test_oversize_base64_timeout_reports_the_known_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 40MB 越过 NapCat base64 内联实测的 37.5MB 线。用稀疏文件造 stat 大小，
+    # 读取本身被打桩——这条测的是「体积信息有没有走到失败文案里」，不是编码性能。
+    big = tmp_path / "big.pdf"
+    with open(big, "wb") as f:
+        f.truncate(40 * 1024 * 1024)
+    monkeypatch.setattr("jmdown.file_send._read_base64", lambda _p: "QUJD")
+
+    client = FakeClient(exc=TimeoutError())
+    with pytest.raises(FileSendError) as cm:
+        await send_file_standard(make_ctx(client), "123456", str(big), payload_mode="base64")
+    msg = str(cm.value)
+    assert "37.5 MB" in msg
+    assert "40.0 MB" in msg
+    assert "stream" in msg
 
 
 async def test_connection_error_is_reported_not_swallowed(pdf: Path) -> None:
