@@ -112,7 +112,13 @@ SUPPORTED_IMPLS: tuple[ImplSupport, ...] = (
 # 三种上传方案的唯一取值集合。``path`` / ``base64`` 走同一组标准动作，
 # 区别只在 file 参数形态；``stream`` 是分片动作。不再提供按 WS 地址猜测的 auto。
 UPLOAD_METHODS: tuple[str, ...] = ("path", "base64", "stream")
-DEFAULT_UPLOAD_METHOD: str = "path"
+
+# 默认 base64 而非 path：path 要求实现端能读到插件所在机器的路径，而 NapCat
+# 主流部署是 Docker —— 容器里看不到宿主机文件，第一次发送就会拿到远端
+# 「文件不存在」，用户无从判断是路径问题还是插件坏了。base64 把内容内联进
+# 请求，不依赖两端共享文件系统，是「装完就能发」的那个。
+# 代价是编码期内存约为文件的 6 倍，因此 max_file_mb 的说明里保留闸门指引。
+DEFAULT_UPLOAD_METHOD: str = "base64"
 
 
 def _names(predicate) -> str:

@@ -74,7 +74,7 @@ def test_schema_method_hint_documents_every_option(hint: str) -> None:
 
 def test_schema_method_options_are_the_three_choices() -> None:
     assert METHOD_FIELD["options"] == list(UPLOAD_METHODS)
-    assert METHOD_FIELD["default"] == "path"
+    assert METHOD_FIELD["default"] == "base64"
 
 
 def test_no_schema_field_can_reintroduce_a_size_gate() -> None:

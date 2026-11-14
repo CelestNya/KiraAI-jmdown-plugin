@@ -211,8 +211,8 @@ FIFO 队列。新条目超出上限时，删除最早下载的条目。索引持
 
 | 值 | 链路 | 适用 | 进度 |
 |----|------|------|------|
-| `path`（默认） | 一次 `upload_private_file` / `upload_group_file`，`file` 为实现端机器上的绝对路径 | 同机部署；零膨胀、无体积闸门；6 种实现全部支持 | 进度未知 |
-| `base64` | 同一组动作，`file` 为 `base64://` 内联内容 | 跨机；体积 +33%，体积上限由实现端决定（插件不设闸门）；仅 NapCat / SnowLuma / LLOneBot / OpenShamrock 支持 | 进度未知 |
+| `path` | 一次 `upload_private_file` / `upload_group_file`，`file` 为实现端机器上的绝对路径 | 同机部署；零膨胀、零编码内存；6 种实现全部支持；**不跨机**（Docker 部署的实现端读不到宿主机路径） | 进度未知 |
+| `base64`（默认） | 同一组动作，`file` 为 `base64://` 内联内容 | 跨机（不要求同机）；体积 +33%、编码期内存约为文件的 6 倍；NapCat 实测 37MB 上限；仅 NapCat / SnowLuma / LLOneBot / OpenShamrock 支持 | 进度未知 |
 | `stream` | `upload_file_stream` 逐片 → 实现端临时路径 → 同一组发送动作 | 跨机大文件；仅 NapCat / SnowLuma 提供 | 分片期间真实百分比；实现端发送阶段进度未知 |
 
 `upload_private_file` / `upload_group_file` 不是 OneBot 11 核心条款，而是 go-cqhttp 引入、
@@ -237,8 +237,8 @@ Lagrange.OneBot / go-cqhttp 不解析 `base64://`，也不提供分片动作，�
 
 **旧配置迁移**：`use_napcat_stream`（开关）与 `file_payload`（载荷）已合并为本项。
 `use_napcat_stream=true` → `stream`；`file_payload=path/base64` → 同名方案；
-`file_payload=auto` → `path`（auto 已移除，启动时写告警日志）。跨机部署请显式改选
-`base64` 或 `stream`。
+`file_payload=auto` → `base64`（auto 已移除，启动时写告警日志）。跨机且文件常超 37MB
+请显式改选 `stream`。
 
 ### 体积上限与失败语义
 

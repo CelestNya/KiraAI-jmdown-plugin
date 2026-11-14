@@ -1,7 +1,7 @@
 """标准上传、三方案分派、旧配置迁移与失败语义测试。
 
 重点不在「能不能发出去」（那需要真实 NapCat），而在：
-- ``upload_method`` 三选一的分派，默认必须是 path
+- ``upload_method`` 三选一的分派，默认必须是 base64（path 不跨机，Docker 下的实现端读不到）
 - 三条路径都没有本地体积闸门：文件原样交给实现端
 - 失败信息如实、非空、带诊断指引（明确拒绝 / 无响应超时 / 连接异常）
 - 旧版「开关 + 载荷」配置升级后能无损迁移
@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from jmdown.file_send import FileSendError, send_file_standard
-from jmdown.impl_support import UPLOAD_METHODS
+from jmdown.impl_support import DEFAULT_UPLOAD_METHOD, UPLOAD_METHODS
 from jmdown.main import JMdownPlugin, _resolve_upload_method
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -219,14 +219,14 @@ async def test_standard_upload_never_reports_fake_percent(pdf: Path) -> None:
 # ── _deliver 三方案分派 ───────────────────────────────────────────────
 
 
-async def test_default_uses_path_standard_upload(plugin: JMdownPlugin) -> None:
+async def test_default_uses_base64_standard_upload(plugin: JMdownPlugin) -> None:
     mock = AsyncMock(return_value="std")
     with patch("jmdown.file_send.send_file_standard", new=mock):
         result = await plugin._deliver("qq:dm:1", "1", False, None, plugin._test_file, None)  # type: ignore[attr-defined]
 
     assert result == "std"
     kwargs = mock.await_args.kwargs
-    assert kwargs["payload_mode"] == "path"
+    assert kwargs["payload_mode"] == "base64"
     assert "max_bytes" not in kwargs, "本地体积闸门已移除"
 
 
@@ -264,11 +264,11 @@ async def test_watchdog_timeout_is_not_an_empty_string(plugin: JMdownPlugin) -> 
 # ── 配置解析与旧配置迁移 ──────────────────────────────────────────────
 
 
-def test_schema_is_exactly_three_methods_defaulting_to_path() -> None:
+def test_schema_is_exactly_three_methods_defaulting_to_base64() -> None:
     schema = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))["upload"]["fields"]
     field = schema["upload_method"]
     assert field["options"] == list(UPLOAD_METHODS)
-    assert field["default"] == "path"
+    assert field["default"] == DEFAULT_UPLOAD_METHOD == "base64"
     for key in ("use_napcat_stream", "file_payload", "standard_max_mb"):
         assert key not in schema
     for hint in (field["hint"], field["locales"]["zh"]["hint"]):
@@ -277,7 +277,7 @@ def test_schema_is_exactly_three_methods_defaulting_to_path() -> None:
 
 
 def test_clean_config_uses_default() -> None:
-    assert _resolve_upload_method(None, {}, {}) == "path"
+    assert _resolve_upload_method(None, {}, {}) == "base64"
 
 
 @pytest.mark.parametrize("method", list(UPLOAD_METHODS))
@@ -287,7 +287,7 @@ def test_new_value_wins(method: str) -> None:
 
 @pytest.mark.parametrize("bad", ["auto", "nonsense"])
 def test_invalid_value_falls_back_to_default(bad: str) -> None:
-    assert _resolve_upload_method(bad, {}, {}) == "path"
+    assert _resolve_upload_method(bad, {}, {}) == "base64"
 
 
 def test_legacy_stream_switch_migrates() -> None:
@@ -299,9 +299,9 @@ def test_legacy_payload_migrates(legacy: str, expected: str) -> None:
     assert _resolve_upload_method(None, {"file_payload": legacy}, {}) == expected
 
 
-def test_legacy_auto_migrates_to_path() -> None:
-    # auto 已移除：跨机用户必须在 WebUI 显式改方案，日志会告警
-    assert _resolve_upload_method(None, {"file_payload": "auto"}, {}) == "path"
+def test_legacy_auto_migrates_to_default() -> None:
+    # auto 已移除：用户必须在 WebUI 显式改方案，日志会告警
+    assert _resolve_upload_method(None, {"file_payload": "auto"}, {}) == "base64"
 
 
 @pytest.mark.parametrize(

@@ -124,13 +124,13 @@
             "upload_method": {
                 "type": "string",
                 "name": "上传方案",
-                "default": "path",
+                "default": "base64",
                 "options": ["path", "base64", "stream"],
-                "hint": "三选一。① path（默认）：用 upload_private_file / upload_group_file 传本地绝对路径，要求实现端与插件同机，零膨胀、无体积闸门，NapCat、SnowLuma、LLOneBot、Lagrange.OneBot、OpenShamrock、go-cqhttp 全部支持；② base64：同样的标准动作但内联 base64:// 内容，跨机可用、体积 +33%，体积上限由实现端决定（插件不设闸门，失败时如实报告原因），仅 NapCat、SnowLuma、LLOneBot、OpenShamrock 支持，Lagrange.OneBot、go-cqhttp 不解析内联，用它们必须选 path 并同机部署；③ stream：upload_file_stream 分片，仅 NapCat、SnowLuma 提供，适合跨机大文件，也是唯一能给出真实上传百分比的方案。三条方案均不设本地体积上限；path / base64 期间进度显示「进度未知」",
+                "hint": "三选一。① base64（默认）：走 upload_private_file / upload_group_file 标准动作，把文件内容内联为 base64://，不要求实现端与插件同机（Docker 部署的 NapCat 也能直接用），代价是体积 +33%、编码期内存约为文件的 6 倍，支持方为 NapCat、SnowLuma、LLOneBot、OpenShamrock，Lagrange.OneBot、go-cqhttp 不解析内联，用它们必须改选 path 并同机部署；② path：同样的标准动作但改为传本地绝对路径，零膨胀、零编码内存，6 种实现全部支持，但要求实现端能读到插件所在机器的路径——NapCat 跑在 Docker 容器里时看不到宿主机文件，发送必然失败；③ stream：upload_file_stream 分片，仅 NapCat、SnowLuma 提供，跨机大文件首选，也是唯一能给出真实上传百分比的方案。三条方案均不设本地体积上限；path / base64 期间进度显示「进度未知」",
                 "locales": {
                     "zh": {
                         "name": "上传方案",
-                        "hint": "三选一。① path（默认）：用 upload_private_file / upload_group_file 传本地绝对路径，要求实现端与插件同机，零膨胀、无体积闸门，NapCat、SnowLuma、LLOneBot、Lagrange.OneBot、OpenShamrock、go-cqhttp 全部支持；② base64：同样的标准动作但内联 base64:// 内容，跨机可用、体积 +33%，体积上限由实现端决定（插件不设闸门，失败时如实报告原因），仅 NapCat、SnowLuma、LLOneBot、OpenShamrock 支持，Lagrange.OneBot、go-cqhttp 不解析内联，用它们必须选 path 并同机部署；③ stream：upload_file_stream 分片，仅 NapCat、SnowLuma 提供，适合跨机大文件，也是唯一能给出真实上传百分比的方案。三条方案均不设本地体积上限；path / base64 期间进度显示「进度未知」"
+                        "hint": "三选一。① base64（默认）：走 upload_private_file / upload_group_file 标准动作，把文件内容内联为 base64://，不要求实现端与插件同机（Docker 部署的 NapCat 也能直接用），代价是体积 +33%、编码期内存约为文件的 6 倍，支持方为 NapCat、SnowLuma、LLOneBot、OpenShamrock，Lagrange.OneBot、go-cqhttp 不解析内联，用它们必须改选 path 并同机部署；② path：同样的标准动作但改为传本地绝对路径，零膨胀、零编码内存，6 种实现全部支持，但要求实现端能读到插件所在机器的路径——NapCat 跑在 Docker 容器里时看不到宿主机文件，发送必然失败；③ stream：upload_file_stream 分片，仅 NapCat、SnowLuma 提供，跨机大文件首选，也是唯一能给出真实上传百分比的方案。三条方案均不设本地体积上限；path / base64 期间进度显示「进度未知」"
                     }
                 }
             },
@@ -138,9 +138,9 @@
                 "type": "integer",
                 "name": "文件大小上限 (MB)",
                 "default": 0,
-                "hint": "0 = 不限制（默认）：文件原样交给实现端，成败由实现端真实上限决定。设为正整数后，超过该体积的文件在发送前被直接拒绝，且失败信息会说明这是插件侧闸门、不是 QQ 或实现端的上限。主要用于限制 base64 方案的内存峰值（base64 峰值约为文件的 5 倍），跨机大文件更推荐 stream 方案",
+                "hint": "0 = 不限制（默认）：文件原样交给实现端，成败由实现端真实上限决定。设为正整数后，超过该体积的文件在发送前被直接拒绝，且失败信息会说明这是插件侧闸门、不是 QQ 或实现端的上限。主要用于限制 base64 方案的内存峰值（实测 200MB 文件峰值约 1.27GB，即文件的 6 倍），跨机大文件更推荐 stream 方案",
                 "locales": {
-                    "zh": { "name": "文件大小上限 (MB)", "hint": "0 = 不限制（默认）：文件原样交给实现端，成败由实现端真实上限决定。设为正整数后，超过该体积的文件在发送前被直接拒绝，且失败信息会说明这是插件侧闸门、不是 QQ 或实现端的上限。主要用于限制 base64 方案的内存峰值（base64 峰值约为文件的 5 倍），跨机大文件更推荐 stream 方案" }
+                    "zh": { "name": "文件大小上限 (MB)", "hint": "0 = 不限制（默认）：文件原样交给实现端，成败由实现端真实上限决定。设为正整数后，超过该体积的文件在发送前被直接拒绝，且失败信息会说明这是插件侧闸门、不是 QQ 或实现端的上限。主要用于限制 base64 方案的内存峰值（实测 200MB 文件峰值约 1.27GB，即文件的 6 倍），跨机大文件更推荐 stream 方案" }
                 }
             },
             "upload_timeout": {
