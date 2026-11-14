@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](requirements.txt)
-[![Version](https://img.shields.io/badge/version-2.10.1-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.11.0-blue)](manifest.json)
 
 **jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 按所选上传方案发送文件到 QQ。
 
