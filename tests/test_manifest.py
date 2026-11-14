@@ -118,11 +118,13 @@ def test_requirements_match_manifest_dependencies(manifest: dict[str, Any]) -> N
 
 # ── 图标契约（镜像 core 的 resolve_manifest_icon_path 规则） ──────────
 
-ICON_KEYS = ("icon", "icon-dark")
+ICON_KEYS = ("icon",)
+# 与 core/utils/path_utils.py 的 _ICON_EXTENSIONS 保持一致
+ALLOWED_ICON_SUFFIXES = {".avif", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp"}
 
 
 @pytest.mark.parametrize("key", ICON_KEYS)
-def test_icon_field_resolves_to_local_svg(manifest: dict[str, Any], key: str) -> None:
+def test_icon_field_resolves_to_local_file(manifest: dict[str, Any], key: str) -> None:
     # core 只接受「相对 manifest 目录且不越界」的路径；绝对路径或越界路径会被
     # 静默判成 None，前端就退回没有图标的样子 —— 这种失败在开发机上完全看不出来。
     value = manifest.get(key)
@@ -132,21 +134,31 @@ def test_icon_field_resolves_to_local_svg(manifest: dict[str, Any], key: str) ->
     assert ".." not in path.parts, f"{key} 不能越出插件目录: {value}"
     target = (ROOT / path).resolve()
     assert target.is_relative_to(ROOT), f"{key} 解析后越出插件目录: {value}"
-    assert target.suffix.lower() == ".svg", f"{key} 必须是 SVG: {value}"
+    assert target.suffix.lower() in ALLOWED_ICON_SUFFIXES, f"{key} 扩展名不在 core 白名单内: {value}"
     assert target.is_file(), f"{key} 指向的文件不存在: {value}"
 
 
 @pytest.mark.parametrize("key", ICON_KEYS)
-def test_icon_svg_is_self_contained(manifest: dict[str, Any], key: str) -> None:
-    # 图标由前端 <img src> 加载，脚本不会执行；但 SVG 能携带外部引用，
-    # 一个 use/href 指向远端地址就足以把插件面板变成外联信标。
+def test_icon_asset_suits_the_card_size(manifest: dict[str, Any], key: str) -> None:
+    # 卡片里图标按 40×40、object-fit:contain 显示，所以源图必须是正方形
+    # （非正方形会在 contain 下留白），且边长不低于 128（4x 屏需要 160px）。
     target = ROOT / manifest[key]
-    root = ET.parse(target).getroot()
-    assert root.tag == "{http://www.w3.org/2000/svg}svg", f"{key} 根元素不是 svg"
-    assert root.get("viewBox"), f"{key} 缺少 viewBox，缩放时会变形"
-    raw = target.read_text(encoding="utf-8").lower()
-    assert "<script" not in raw, f"{key} 不能包含脚本"
-    assert 'href="http' not in raw, f"{key} 不能外链外部资源"
+    if target.suffix.lower() == ".svg":
+        root = ET.parse(target).getroot()
+        assert root.tag == "{http://www.w3.org/2000/svg}svg", f"{key} 根元素不是 svg"
+        assert root.get("viewBox"), f"{key} 缺少 viewBox，缩放时会变形"
+        # SVG 由前端 <img src> 加载，脚本不会执行；但它能携带外部引用，
+        # 一个 href 指向远端地址就足以把插件面板变成外联信标。
+        raw = target.read_text(encoding="utf-8").lower()
+        assert "<script" not in raw, f"{key} 不能包含脚本"
+        assert 'href="http' not in raw, f"{key} 不能外链外部资源"
+        return
+
+    from PIL import Image
+
+    with Image.open(target) as im:
+        assert im.width == im.height, f"{key} 必须是正方形，当前 {im.width}×{im.height}"
+        assert im.width >= 128, f"{key} 分辨率过低（{im.width}px），40px 卡片在 4x 屏上需要 160px"
 
 
 # ── README 与源码同步 ─────────────────────────────────────────────────
