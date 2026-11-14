@@ -788,8 +788,6 @@ class JMdownPlugin(BasePlugin):
 
         # 从这里到注册任务之间有 await，先占位，保证「检查-注册」是原子的
         self._pending_aids.add(album_id)
-        # 从这里到注册任务之间有 await，先占位，保证「检查-注册」是原子的
-        self._pending_aids.add(album_id)
         try:
             # 预查本子是否存在，10s 超时兜底（网络波动 fallthrough 到后台任务）
             try:
