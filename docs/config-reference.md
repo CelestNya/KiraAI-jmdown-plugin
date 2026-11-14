@@ -197,7 +197,9 @@ FIFO 队列。新条目超出上限时，删除最早下载的条目。索引持
 
 设为正整数即在发送前拦截超限文件，失败信息里明确写「这是插件侧的保护性闸门，**不是 QQ 或实现端的上限**」，并给出调大 / 设为 0 的操作建议。它不改实现端行为，只决定要不要发出去。
 
-主要用途是限制 `base64` 方案的内存峰值：base64 链路的字节 → 编码 → 字符串 → `json.dumps` 串行复制，实测峰值约为文件的 **5.3 倍**（50MB → 267MB），而 `path` / `stream` 的内存占用都是 O(1)。跨机大文件请优先用 `stream`。
+主要用途是限制 `base64` 方案的内存峰值：base64 链路的字节 → 编码 → 字符串 → `json.dumps` 串行复制，实测峰值约为文件的 **6.3 倍**（200MB → 1267MB；其中约三成来自 `json.dumps` 又复制了一份 payload）。而 `path` / `stream` 的内存占用都是 O(1)。
+
+峰值会按并发叠加：`download.max_concurrent` 默认 2，两个大任务同时编码就是 2 倍。跨机大文件请优先用 `stream`；确定要用 `base64` 送大文件时，把 `max_file_mb` 设成你能承受的峰值除以 6.3。
 
 ### upload_timeout
 
@@ -211,8 +213,8 @@ FIFO 队列。新条目超出上限时，删除最早下载的条目。索引持
 
 | 值 | 链路 | 适用 | 进度 |
 |----|------|------|------|
-| `path`（默认） | 一次 `upload_private_file` / `upload_group_file`，`file` 为实现端机器上的绝对路径 | 同机部署；零膨胀、无体积闸门；6 种实现全部支持 | 进度未知 |
-| `base64` | 同一组动作，`file` 为 `base64://` 内联内容 | 跨机；体积 +33%，体积上限由实现端决定（插件不设闸门）；仅 NapCat / SnowLuma / LLOneBot / OpenShamrock 支持 | 进度未知 |
+| `path` | 一次 `upload_private_file` / `upload_group_file`，`file` 为实现端机器上的绝对路径 | 同机部署；零膨胀、零编码内存；6 种实现全部支持；**不跨机**（Docker 部署的实现端读不到宿主机路径） | 进度未知 |
+| `base64`（默认） | 同一组动作，`file` 为 `base64://` 内联内容 | 跨机（不要求同机）；体积 +33%、编码期内存约为文件的 6 倍；NapCat 实测 37MB 上限；仅 NapCat / SnowLuma / LLOneBot / OpenShamrock 支持 | 进度未知 |
 | `stream` | `upload_file_stream` 逐片 → 实现端临时路径 → 同一组发送动作 | 跨机大文件；仅 NapCat / SnowLuma 提供 | 分片期间真实百分比；实现端发送阶段进度未知 |
 
 `upload_private_file` / `upload_group_file` 不是 OneBot 11 核心条款，而是 go-cqhttp 引入、
@@ -237,8 +239,8 @@ Lagrange.OneBot / go-cqhttp 不解析 `base64://`，也不提供分片动作，�
 
 **旧配置迁移**：`use_napcat_stream`（开关）与 `file_payload`（载荷）已合并为本项。
 `use_napcat_stream=true` → `stream`；`file_payload=path/base64` → 同名方案；
-`file_payload=auto` → `path`（auto 已移除，启动时写告警日志）。跨机部署请显式改选
-`base64` 或 `stream`。
+`file_payload=auto` → `base64`（auto 已移除，启动时写告警日志）。跨机且文件常超 37MB
+请显式改选 `stream`。
 
 ### 体积上限与失败语义
 
@@ -252,6 +254,11 @@ Lagrange.OneBot / go-cqhttp 不解析 `base64://`，也不提供分片动作，�
 `Client Error: Max payload size exceeded`，与 `maxPayload=50MiB` × 3/4 ≈ 37.5 MiB 一致。
 旧文档「16MB 帧上限 → 取 10MB」的推导已被证伪。该实测值仅作排障参考，
 **不会写回配置**，其他实现的上限需各自实测。
+
+当失败发生在 `base64` 载荷且文件 ≥30MB 时，失败文案会自动附上这条参考（具体数字、
+当前体积、以及改用 `stream` / `path` 的方向）。措辞是「实测 / 可能」而非断言——上限是
+实现端的属性，换 LLOneBot / OpenShamrock 数字就不同。小文件与 `path` 载荷不会带这条，
+避免变成噪音。
 
 失败信息分两类，文本经 `TaskState.error` → 完成通知送达 LLM：
 

@@ -146,7 +146,7 @@ async def run_e2e() -> int:
             async def progress(_pct: int | None, _note: str) -> None:
                 return None
 
-            # 1) 标准路线：默认 path 直传
+            # 1) 标准路线：path 直传（显式指定，非默认值）
             server.requests.clear()
             result = await plugin()._deliver("qq:dm:123456", "123456", False, None, str(path), progress)
             checks.check(

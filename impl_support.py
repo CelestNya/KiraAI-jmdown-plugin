@@ -112,7 +112,13 @@ SUPPORTED_IMPLS: tuple[ImplSupport, ...] = (
 # 三种上传方案的唯一取值集合。``path`` / ``base64`` 走同一组标准动作，
 # 区别只在 file 参数形态；``stream`` 是分片动作。不再提供按 WS 地址猜测的 auto。
 UPLOAD_METHODS: tuple[str, ...] = ("path", "base64", "stream")
-DEFAULT_UPLOAD_METHOD: str = "path"
+
+# 默认 base64 而非 path：path 要求实现端能读到插件所在机器的路径，而 NapCat
+# 主流部署是 Docker —— 容器里看不到宿主机文件，第一次发送就会拿到远端
+# 「文件不存在」，用户无从判断是路径问题还是插件坏了。base64 把内容内联进
+# 请求，不依赖两端共享文件系统，是「装完就能发」的那个。
+# 代价是编码期内存约为文件的 6 倍，因此 max_file_mb 的说明里保留闸门指引。
+DEFAULT_UPLOAD_METHOD: str = "base64"
 
 
 def _names(predicate) -> str:
@@ -169,23 +175,80 @@ def diagnosis_hint() -> str:
     )
 
 
-def format_action_failure(action: str, resp: dict, *, stage: str) -> str:
+# NapCat 上 ``base64://`` 内联的实测上限。依据 2026-11-12 在线实测：
+# 37MB 成功 / 38MB 起失败（实现端日志 ``Max payload size exceeded``），
+# 与 WS ``maxPayload=50MiB`` × 3/4 ≈ 37.5MiB 吻合 —— 3/4 正是 base64 的膨胀率。
+BASE64_INLINE_CEILING_MB = 37.5
+
+# 提示触发线。取 30MB 是为了在「还差几 MB 就撞线」时也能提醒到；
+# 只在 base64 且已经失败时才出现，小文件不会因此多出一句噪音。
+BASE64_WARN_FROM_MB = 30.0
+
+
+def base64_ceiling_note(size_bytes: int | None, payload_mode: str | None) -> str:
+    """base64 失败时补一条「已知上限」参考。
+
+    措辞刻意是「实测/可能」而不是「你超限了」：这个数字是 NapCat 的属性，
+    换实现（LLOneBot、OpenShamrock）就不同，插件不替实现端断言上限。
+    """
+    if payload_mode != "base64" or size_bytes is None:
+        return ""
+    mb = size_bytes / 1024 / 1024
+    if mb < BASE64_WARN_FROM_MB:
+        return ""
+    return (
+        f" 参考：NapCat 的 base64:// 内联实测在约 {BASE64_INLINE_CEILING_MB:g} MB 起被拒"
+        f"（maxPayload=50MiB × 3/4 ≈ 该值），当前文件 {mb:.1f} MB 已进入这个区间。"
+        "本例可能正是被实现端丢弃的请求体；改用 stream（NapCat / SnowLuma）或 path（需同机）重试可能直接成功。"
+    )
+
+
+def base64_support_note(payload_mode: str | None) -> str:
+    """base64 载荷失败时提醒「有些实现根本不解析内联」。
+
+    这条与体积无关，所以不看 size：``Lagrange.OneBot`` / ``go-cqhttp`` 的
+    ``file`` 只接受本地路径，任何体积的 ``base64://`` 都会失败。默认值改成
+    base64 之后，这两家的用户升级即失效，失败文案必须能自己说出原因。
+    """
+    if payload_mode != "base64":
+        return ""
+    return (
+        f" 若实现端是 {PATH_ONLY_IMPLS}，它们不解析 base64://（file 只接受本地路径），"
+        "任何体积都会失败；请把上传方案改为 path 并确保实现端与插件同机。"
+    )
+
+
+def format_action_failure(
+    action: str,
+    resp: dict,
+    *,
+    stage: str,
+    size_bytes: int | None = None,
+    payload_mode: str | None = None,
+) -> str:
     """实现端明确返回失败响应：原样转述，不替实现端判断原因。"""
     return (
         f"{stage}失败：实现端对 {action} 返回了失败响应（{response_summary(resp)}）。"
         "插件默认不设本地体积上限（可配 upload.max_file_mb），上限由实现端决定。"
-        f"{diagnosis_hint()}"
+        f"{diagnosis_hint()}{base64_support_note(payload_mode)}{base64_ceiling_note(size_bytes, payload_mode)}"
     )
 
 
-def format_no_response(action: str, timeout: float, *, stage: str, size_bytes: int | None = None) -> str:
+def format_no_response(
+    action: str,
+    timeout: float,
+    *,
+    stage: str,
+    size_bytes: int | None = None,
+    payload_mode: str | None = None,
+) -> str:
     """等待响应超时：如实说明「没收到响应」，列可能原因但不断言是哪一种。"""
     size = f"（文件 {size_bytes / 1024 / 1024:.1f} MB）" if size_bytes is not None else ""
     return (
         f"{stage}失败：{action} 在 {timeout:g}s 内未收到实现端响应{size}。"
         "这不是实现端明确拒绝；可能原因包括请求体被实现方丢弃/超限、连接中断、"
         "或实现端转存耗时超过超时设置。插件无法从客户端区分，需查实现端日志确认。"
-        f"{diagnosis_hint()}"
+        f"{diagnosis_hint()}{base64_support_note(payload_mode)}{base64_ceiling_note(size_bytes, payload_mode)}"
     )
 
 

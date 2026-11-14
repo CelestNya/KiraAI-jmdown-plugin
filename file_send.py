@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import threading
 from pathlib import Path
 
 from .impl_support import (
@@ -41,9 +42,16 @@ from .napcat_stream import _find_qq_adapter, _fmt
 
 STANDARD_PAYLOAD_MODES = frozenset({"path", "base64"})
 
+# base64 编码的内存峰值约为文件的 6 倍（实测 200MB → 1.27GB），而下载任务默认
+# 允许 2 个并发（``download.max_concurrent``），两个大文件同时编码就是数 GB。
+# 这里用**同步**信号量而不是 asyncio 信号量：``asyncio.to_thread`` 被取消时只停
+# await 那一侧，线程仍会跑完、内存仍然占着；只有同步信号量能保证「线程真正结束」
+# 才释放槽位，从而给同时存在的编码副本数一个硬上限。
+_ENCODE_SLOTS = threading.Semaphore(2)
+
 
 def _read_base64(path: str) -> str:
-    with open(path, "rb") as f:
+    with _ENCODE_SLOTS, open(path, "rb") as f:
         return base64.b64encode(f.read()).decode()
 
 
@@ -100,7 +108,9 @@ async def send_file_standard(
     try:
         resp = await client.send_action(action, params, timeout=timeout)
     except TimeoutError as e:
-        raise FileSendError(format_no_response(action, timeout, stage="标准上传", size_bytes=size)) from e
+        raise FileSendError(
+            format_no_response(action, timeout, stage="标准上传", size_bytes=size, payload_mode=payload_mode)
+        ) from e
     except Exception as e:
         # ConnectionClosed 不是 OSError，必须单独识别；其余异常原样上抛
         if not is_disconnect_error(e):
@@ -108,6 +118,8 @@ async def send_file_standard(
         raise FileSendError(format_disconnect(action, "标准上传", e)) from e
 
     if not is_ok_response(resp):
-        raise FileSendError(format_action_failure(action, resp, stage="标准上传"))
+        raise FileSendError(
+            format_action_failure(action, resp, stage="标准上传", size_bytes=size, payload_mode=payload_mode)
+        )
 
     return f"已通过标准上传发送 ({_fmt(size)}, 载荷={payload_mode})"

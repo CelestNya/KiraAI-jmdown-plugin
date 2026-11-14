@@ -1,7 +1,7 @@
 """标准上传、三方案分派、旧配置迁移与失败语义测试。
 
 重点不在「能不能发出去」（那需要真实 NapCat），而在：
-- ``upload_method`` 三选一的分派，默认必须是 path
+- ``upload_method`` 三选一的分派，默认必须是 base64（path 不跨机，Docker 下的实现端读不到）
 - 三条路径都没有本地体积闸门：文件原样交给实现端
 - 失败信息如实、非空、带诊断指引（明确拒绝 / 无响应超时 / 连接异常）
 - 旧版「开关 + 载荷」配置升级后能无损迁移
@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from jmdown.file_send import FileSendError, send_file_standard
-from jmdown.impl_support import UPLOAD_METHODS
+from jmdown.impl_support import DEFAULT_UPLOAD_METHOD, UPLOAD_METHODS
 from jmdown.main import JMdownPlugin, _resolve_upload_method
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -163,6 +163,49 @@ async def test_timeout_with_empty_message_still_yields_useful_error(pdf: Path) -
     assert "300s" in msg
     assert "Max payload size exceeded" in msg
     assert "文件太大" not in msg
+    # 小文件不该被扣上「撞了内联上限」的帽子
+    assert "37.5 MB" not in msg
+
+
+async def test_oversize_base64_timeout_reports_the_known_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 40MB 越过 NapCat base64 内联实测的 37.5MB 线。用稀疏文件造 stat 大小，
+    # 读取本身被打桩——这条测的是「体积信息有没有走到失败文案里」，不是编码性能。
+    big = tmp_path / "big.pdf"
+    with open(big, "wb") as f:
+        f.truncate(40 * 1024 * 1024)
+    monkeypatch.setattr("jmdown.file_send._read_base64", lambda _p: "QUJD")
+
+    client = FakeClient(exc=TimeoutError())
+    with pytest.raises(FileSendError) as cm:
+        await send_file_standard(make_ctx(client), "123456", str(big), payload_mode="base64")
+    msg = str(cm.value)
+    assert "37.5 MB" in msg
+    assert "40.0 MB" in msg
+    assert "stream" in msg
+
+
+async def test_explicit_base64_failure_reaches_the_hint_through_send_file_standard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """明确失败响应也要走同一条透传链路。
+
+    直接调 ``format_action_failure`` 的用例只能证明函数本身对，证明不了
+    ``send_file_standard`` 还在把 size / payload_mode 传下去——所以这条从外层打进去。
+    """
+    big = tmp_path / "big.pdf"
+    with open(big, "wb") as f:
+        f.truncate(40 * 1024 * 1024)
+    monkeypatch.setattr("jmdown.file_send._read_base64", lambda _p: "QUJD")
+
+    client = FakeClient(status="failed")
+    with pytest.raises(FileSendError) as cm:
+        await send_file_standard(make_ctx(client), "123456", str(big), payload_mode="base64")
+    msg = str(cm.value)
+    assert "失败响应" in msg
+    assert "37.5 MB" in msg
+    assert "Lagrange.OneBot" in msg, "不解析 base64 的实现方也要被点名"
 
 
 async def test_connection_error_is_reported_not_swallowed(pdf: Path) -> None:
@@ -219,14 +262,14 @@ async def test_standard_upload_never_reports_fake_percent(pdf: Path) -> None:
 # ── _deliver 三方案分派 ───────────────────────────────────────────────
 
 
-async def test_default_uses_path_standard_upload(plugin: JMdownPlugin) -> None:
+async def test_default_uses_base64_standard_upload(plugin: JMdownPlugin) -> None:
     mock = AsyncMock(return_value="std")
     with patch("jmdown.file_send.send_file_standard", new=mock):
         result = await plugin._deliver("qq:dm:1", "1", False, None, plugin._test_file, None)  # type: ignore[attr-defined]
 
     assert result == "std"
     kwargs = mock.await_args.kwargs
-    assert kwargs["payload_mode"] == "path"
+    assert kwargs["payload_mode"] == "base64"
     assert "max_bytes" not in kwargs, "本地体积闸门已移除"
 
 
@@ -261,14 +304,30 @@ async def test_watchdog_timeout_is_not_an_empty_string(plugin: JMdownPlugin) -> 
     assert "1s" in msg
 
 
+async def test_watchdog_timeout_carries_the_base64_ceiling_hint(plugin: JMdownPlugin) -> None:
+    """总看门狗常常比内层超时更早触发，它的文案必须也能带上体积信息。"""
+
+    async def never_finishes() -> str:
+        await asyncio.sleep(3600)
+        return "unreachable"
+
+    with pytest.raises(TimeoutError) as cm:
+        await plugin._upload_with_watchdog(
+            never_finishes(), timeout=1, size_bytes=40 * 1024 * 1024, payload_mode="base64"
+        )
+    msg = str(cm.value)
+    assert "37.5 MB" in msg
+    assert "40.0 MB" in msg
+
+
 # ── 配置解析与旧配置迁移 ──────────────────────────────────────────────
 
 
-def test_schema_is_exactly_three_methods_defaulting_to_path() -> None:
+def test_schema_is_exactly_three_methods_defaulting_to_base64() -> None:
     schema = json.loads((ROOT / "schema.json").read_text(encoding="utf-8"))["upload"]["fields"]
     field = schema["upload_method"]
     assert field["options"] == list(UPLOAD_METHODS)
-    assert field["default"] == "path"
+    assert field["default"] == DEFAULT_UPLOAD_METHOD == "base64"
     for key in ("use_napcat_stream", "file_payload", "standard_max_mb"):
         assert key not in schema
     for hint in (field["hint"], field["locales"]["zh"]["hint"]):
@@ -277,7 +336,7 @@ def test_schema_is_exactly_three_methods_defaulting_to_path() -> None:
 
 
 def test_clean_config_uses_default() -> None:
-    assert _resolve_upload_method(None, {}, {}) == "path"
+    assert _resolve_upload_method(None, {}, {}) == "base64"
 
 
 @pytest.mark.parametrize("method", list(UPLOAD_METHODS))
@@ -287,7 +346,7 @@ def test_new_value_wins(method: str) -> None:
 
 @pytest.mark.parametrize("bad", ["auto", "nonsense"])
 def test_invalid_value_falls_back_to_default(bad: str) -> None:
-    assert _resolve_upload_method(bad, {}, {}) == "path"
+    assert _resolve_upload_method(bad, {}, {}) == "base64"
 
 
 def test_legacy_stream_switch_migrates() -> None:
@@ -299,9 +358,9 @@ def test_legacy_payload_migrates(legacy: str, expected: str) -> None:
     assert _resolve_upload_method(None, {"file_payload": legacy}, {}) == expected
 
 
-def test_legacy_auto_migrates_to_path() -> None:
-    # auto 已移除：跨机用户必须在 WebUI 显式改方案，日志会告警
-    assert _resolve_upload_method(None, {"file_payload": "auto"}, {}) == "path"
+def test_legacy_auto_migrates_to_default() -> None:
+    # auto 已移除：用户必须在 WebUI 显式改方案，日志会告警
+    assert _resolve_upload_method(None, {"file_payload": "auto"}, {}) == "base64"
 
 
 @pytest.mark.parametrize(

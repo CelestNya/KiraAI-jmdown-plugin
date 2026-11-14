@@ -566,12 +566,22 @@ class JMdownPlugin(BasePlugin):
         self._bg_tasks.clear()
         logger.info("JMdown 已终止")
 
-    async def _upload_with_watchdog(self, upload_coro, timeout: int) -> str:
+    async def _upload_with_watchdog(
+        self,
+        upload_coro,
+        timeout: int,
+        *,
+        size_bytes: int | None = None,
+        payload_mode: str | None = None,
+    ) -> str:
         """标准方案（path / base64）的硬超时兜底。
 
         这两条方案只有一次 ``send_action``，总时长上限有意义，超时即失败。
         内层超时若已带动作名等信息就保留原文，只补上诊断指引；空消息则换成
         带方案名与超时秒数的完整说明，避免 LLM 收到空白失败原因。
+
+        ``size_bytes`` / ``payload_mode`` 只是为了让兜底文案也能带上
+        「base64 内联上限」那条参考——这条闸门常常比内层更早触发。
         """
         try:
             return await asyncio.wait_for(upload_coro, timeout=timeout)
@@ -580,7 +590,13 @@ class JMdownPlugin(BasePlugin):
             detail = (
                 f"{original} {diagnosis_hint()}"
                 if original
-                else format_no_response(f"{self._upload_method} 方案", timeout, stage="上传总看门狗")
+                else format_no_response(
+                    f"{self._upload_method} 方案",
+                    timeout,
+                    stage="上传总看门狗",
+                    size_bytes=size_bytes,
+                    payload_mode=payload_mode,
+                )
             )
             raise TimeoutError(detail) from e
 
@@ -610,20 +626,22 @@ class JMdownPlugin(BasePlugin):
                 await task
             raise
 
-    async def _check_size_limit(self, file_path: str) -> None:
+    async def _check_size_limit(self, file_path: str) -> int:
         """配置闸门：max_file_mb > 0 时拦截超大文件，说明这是插件侧限制。
 
         stat 丢线程：规则要求文件 IO 走异步；同时把 stat 失败包成 FileSendError，
         否则文件缺失/不可读时 LLM 收到的是裸 `FileNotFoundError`，没有可操作信息。
+
+        返回文件字节数，供失败文案判断「是否已经接近 base64 内联上限」——
+        闸门关闭时也要照常 stat，否则最需要这条提示的场景反而拿不到体积。
         """
-        if self._max_file_mb <= 0:
-            return
         try:
             size = await asyncio.to_thread(lambda: Path(file_path).stat().st_size)
         except OSError as e:
             raise FileSendError(f"待发送文件不可读（{file_path}）：{type(e).__name__}: {e}") from e
-        if size > self._max_file_mb * 1024 * 1024:
+        if self._max_file_mb > 0 and size > self._max_file_mb * 1024 * 1024:
             raise FileSendError(format_size_limit(size, self._max_file_mb, self._upload_method))
+        return size
 
     async def _deliver(
         self,
@@ -643,7 +661,7 @@ class JMdownPlugin(BasePlugin):
         """
         file_path = str(Path(upload_path).resolve())
         ul_timeout = self._upload_timeout + 120
-        await self._check_size_limit(file_path)
+        size_bytes = await self._check_size_limit(file_path)
 
         if self._upload_method == "stream":
             from .napcat_stream import StallGuard, send_file_via_stream
@@ -678,7 +696,9 @@ class JMdownPlugin(BasePlugin):
             progress_cb=progress_cb,
             payload_mode=self._upload_method,
         )
-        return await self._upload_with_watchdog(coro, timeout=ul_timeout)
+        return await self._upload_with_watchdog(
+            coro, timeout=ul_timeout, size_bytes=size_bytes, payload_mode=self._upload_method
+        )
 
     async def _notice(self, sid: str, text: str, *, mentioned: bool = False):
         """通过会话发送进度通知。mentioned=True 会触发目标会话 LLM 回复。"""
@@ -766,8 +786,6 @@ class JMdownPlugin(BasePlugin):
         if session is not None and target != session.sid and not self._allow_cross_session:
             return f"错误: 不允许转发到其他会话（当前: {session.sid}，目标: {target}）"
 
-        # 从这里到注册任务之间有 await，先占位，保证「检查-注册」是原子的
-        self._pending_aids.add(album_id)
         # 从这里到注册任务之间有 await，先占位，保证「检查-注册」是原子的
         self._pending_aids.add(album_id)
         try:

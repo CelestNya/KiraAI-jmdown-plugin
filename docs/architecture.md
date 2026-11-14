@@ -68,18 +68,27 @@ LLM 调用 send_jm_album (或 query_jm_album / search_jm_album)
 
 KiraAI tool 有约 60s 超时。下载 + PDF + 上传大文件远超此限制。后台 task 配合 `query_jm_task` 轮询 + 完成通知，完全绕过超时。
 
-### 为何默认 path，以及三种方案的取舍
+### 为何默认 base64，以及三种方案的取舍
 
 `upload_private_file` / `upload_group_file` 是覆盖面最广的扩展动作：NapCat、SnowLuma、
 LLOneBot、Lagrange.OneBot、OpenShamrock、go-cqhttp 都实现（见 `impl_support.py`）。
-`path` 在此基础上只传绝对路径，请求体极小，一次 `send_action` 完成，没有多帧与超时叠加，
-因此作为唯一不挑实现的默认值——代价是必须同机部署。
+两者的差别只在 `file` 参数的形态。
 
-`base64` 把文件内容内联进 `file`，跨机可用但体积 +33%，且 Lagrange.OneBot / go-cqhttp
-不解析 `base64://`；`stream` 走 `upload_file_stream` 分片，只有 NapCat 与 SnowLuma 提供，
-适合跨机大文件，绕开内联膨胀与请求体上限，代价是每片一次 round-trip、每片独立超时，
-以及进度回调与失败面的复杂度。三种方案由 `upload_method` 显式选择，不再按 WS 地址猜测，
-避免「换了个部署位置就静默换链路」。
+**默认取 `base64`，不取 `path`。** `path` 的请求体只有一个路径字符串，零膨胀零编码内存，
+6 种实现全支持——但它成立的前提是「实现端读得到插件所在机器的这个路径」。NapCat 主流
+用 Docker 部署，容器内看不到宿主机文件，于是第一次发送就得到远端「文件不存在」，用户无法
+判断这是路径问题、权限问题还是插件坏了。`base64` 把内容内联进请求，不依赖两端共享文件
+系统，是「装完就能发」的那一个。
+
+代价有两条，都写进了配置提示：体积 +33%，编码期内存约为文件的 6 倍（实测 200MB 文件峰值
+1.27GB）；以及内联体积天花板——NapCat 在线实测 37MB 起失败（`maxPayload=50MiB` × 3/4）。
+后者是更硬的一条：本子 PDF 常超过 37MB，这类任务在 `base64` 下必然失败，且表现为超时
+（超限帧被实现端直接丢弃、不返失败响应）。**文件可能很大时应显式改选 `stream`**：
+`upload_file_stream` 分片不产生内联膨胀，同机跨机都通，还是唯一能给出真实上传百分比的
+方案；代价是只有 NapCat 与 SnowLuma 提供，且每片一次 round-trip、每片独立超时。
+
+三种方案由 `upload_method` 显式选择，不做运行时探测、不按 WS 地址猜测——避免「换了个
+部署位置就静默换链路」。选错的代价是明确的失败信息，不是沉默。
 
 进度方面，标准动作是单次调用、协议不回报中间状态，只有 `stream` 分片期间能给出真实
 百分比；其余阶段统一显示「进度未知」，不伪造数字误导 LLM。

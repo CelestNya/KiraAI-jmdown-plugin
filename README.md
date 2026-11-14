@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](requirements.txt)
-[![Version](https://img.shields.io/badge/version-2.11.0-blue)](manifest.json)
+[![Version](https://img.shields.io/badge/version-2.11.1-blue)](manifest.json)
 
 **jmdown** 是 [KiraAI](https://github.com/CelestNya/KiraAI) 的插件，用于下载禁漫天堂 (JMComic) 本子 → 合成 PDF → 按所选上传方案发送文件到 QQ。
 
@@ -130,9 +130,9 @@ LLM → 告知用户任务已提交
 | **质量** ||||
 | `pdf_quality` | integer | 85 | JPEG 质量 (1-100) |
 | **上传** ||||
-| `upload_method` | string | path | 三选一：`path`=标准动作+本地绝对路径（同机，6 种实现全支持）/ `base64`=标准动作+内联内容（跨机，+33%，仅 4 种实现支持）/ `stream`=分片（仅 NapCat、SnowLuma，唯一有真实上传百分比）。下拉框的 hint 有逐项说明 |
+| `upload_method` | string | base64 | 三选一：`base64`=标准动作+内联内容（**默认**，跨机可用，+33%，NapCat 实测 37MB 上限，仅 4 种实现支持）/ `path`=标准动作+本地绝对路径（零膨胀，6 种实现全支持，但要求实现端与插件同机，Docker 部署下必然失败）/ `stream`=分片（仅 NapCat、SnowLuma，唯一有真实上传百分比，无内联体积天花板）。下拉框的 hint 有逐项说明 |
 | `upload_timeout` | integer | 300 | 上传超时秒数。`path`/`base64` 是单次动作的总超时；`stream` 是**单片**超时（取 1/10），发送阶段独立用 +120s |
-| `max_file_mb` | integer | 0 | 插件侧文件大小上限（MB），**0 = 不限制（默认）**。>0 时超限文件发送前被拒，信息里会说明这是插件闸门、不是实现端上限。主要用来限 `base64` 的内存峰值（约为文件的 5.3 倍） |
+| `max_file_mb` | integer | 0 | 插件侧文件大小上限（MB），**0 = 不限制（默认）**。>0 时超限文件发送前被拒，信息里会说明这是插件闸门、不是实现端上限。主要用来限 `base64` 的内存峰值（实测约为文件的 6.3 倍，且随并发叠加） |
 | `chunk_size` | integer | 524288 | 仅 `stream` 生效：分片字节数，默认 512KB |
 | **缓存** ||||
 | `max_cache` | integer | 10 | 最多缓存几本 PDF |
@@ -153,13 +153,17 @@ LLM → 告知用户任务已提交
 | OpenShamrock | ✅ | ✅ | ✅ | ❌ |
 | go-cqhttp（已停维护） | ✅ | ✅ | ❌ | ❌ |
 
-三种方案按部署形态显式选择：同机用 `path`；跨机且实现支持内联用 `base64`；跨机大文件且实现为 NapCat / SnowLuma 用 `stream`。Lagrange.OneBot 与 go-cqhttp 既不解析 `base64://` 也不提供分片动作，只能同机 + `path`。
+默认 `base64` 的理由：`path` 要求实现端读得到插件所在机器的路径，而 NapCat 主流用 Docker 部署——容器里看不到宿主机文件，第一次发送就会拿到远端「文件不存在」。`base64` 不依赖两端共享文件系统。
+
+但 `base64` 有内联体积天花板：NapCat 在线实测 37MB 起失败（`maxPayload=50MiB` × 3/4），本子 PDF 常超过这个值，此时应改选 `stream`。`stream` 只在 NapCat / SnowLuma 上可用，但同机跨机通吃、无体积膨胀、还有真实进度。Lagrange.OneBot 与 go-cqhttp 既不解析 `base64://` 也不提供分片动作，只能同机 + `path`。
 
 进度语义：`path` / `base64` 是单次动作，协议不回报中间状态，状态显示「进度未知」；`stream` 分片期间显示真实百分比，分片完成后实现端发送阶段同样显示「进度未知」。
 
 体积上限：三条方案**均不设本地闸门**，由实现端决定成败。2026-11-12 实测 NapCat.Core 4.18.14 的 `base64` 私聊文件 37 MB 成功、38 MB 触发 `Max payload size exceeded`（与 `maxPayload=50MiB` 一致）；该值仅作排障参考，不写回配置。失败时如实报告实现端返回的 `status` / `retcode` / `message`，或说明「等待响应超时」并附诊断指引，不腉断原因、不编造上限。
 
-旧配置迁移：`use_napcat_stream` / `file_payload` 已合并为 `upload_method`。旧值 `auto` 已移除，升级后按 `path` 处理并写告警日志；跨机部署请在 WebUI 重新选 `base64` 或 `stream`。
+旧配置迁移：`use_napcat_stream` / `file_payload` 已合并为 `upload_method`。旧值 `auto` 已移除，升级后按 `base64` 处理并写告警日志；文件常超 37MB 请改选 `stream`。
+
+**升级注意**：`upload_method` 一旦在 WebUI 里保存过就会持久化，此前存下的 `path` 不会被新版默认值覆盖——如果你的实现端跑在 Docker 里，升级后请手动改成 `base64` 或 `stream`。
 
 ## 缓存位置
 
